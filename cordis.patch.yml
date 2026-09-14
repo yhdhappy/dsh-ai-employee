@@ -1,11 +1,16 @@
-# dsh-ai-employee：给每个项目配一个 AI 团队
+# cordis.patch.yml — dsh-ai-employee 在安装时被作为 profile bundle 层应用。
 #
-# 当前为仓库初始化占位：声明插件 row，但不注册任何能力。
-# Phase 1 起在此填 build/insert 条目，把 ai-employee-plugin 挂进 profile。
+# 这里只声明一行：把本插件注册成宿主 loader 里的一个 row。
+# 浏览器半边由 package.json 的 dsh.client 声明 + lib/client.js 自动发现。
 #
-# 说明：Cordis 通过 `name` 解析实际包。本地开发阶段用 dsh plugin add 安装
-# 本工程时，`name` 会指向安装后的包路径；正式发布后指向 @yhdhappy/dsh-ai-employee。
-#
-# - insert:
-#     - id: ai-employee-plugin
-#       name: '@yhdhappy/dsh-ai-employee'
+# 安装方式（用户手动执行）：
+#   cd <本仓库>
+#   pnpm build                 # 生成 lib/
+#   dsh plugin --profile web add "link:$PWD"
+#   （等价于在 web profile 的 package.json 加一个 link: 依赖，pnpm install，
+#    reconcile 会自动把 @yhdhappy/dsh-ai-employee 加入 dsh.profile.bundles，
+#    然后这份 patch 作为新的一层被应用。）
+
+- insert:
+    - id: ai-employee
+      name: '@yhdhappy/dsh-ai-employee'
