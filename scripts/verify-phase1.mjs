@@ -148,9 +148,9 @@ const failingDomain = {
 const api = await createAiEmployee({ storageDomain: mockStorageDomain(), execCommand: fakeExec })
 check('P1.0 工厂装配出 workspaces/bots', !!api.workspaces && !!api.bots)
 check('P1.0 域名为 ai_employee', sawSpec && sawSpec.name === 'ai_employee', sawSpec && sawSpec.name)
-check('P1.0 域含 3 张表(workspace/bot/bot_template)',
-  sawSpec && Object.keys(sawSpec.tables).sort().join(',') === 'bot,bot_template,workspace',
-  sawSpec && Object.keys(sawSpec.tables).join(','))
+check('P1.0 域含 6 张表(workspace/bot/bot_template/workflow/task/audit_event)',
+  sawSpec && Object.keys(sawSpec.tables).sort().join(',') === 'audit_event,bot,bot_template,task,workflow,workspace',
+  sawSpec && Object.keys(sawSpec.tables).sort().join(','))
 check('P1.0 每张表都有 .parse() 校验器',
   sawSpec && Object.values(sawSpec.tables).every((t) => typeof t.valueSchema.parse === 'function'))
 

@@ -171,3 +171,186 @@ export const botTemplateValidator = mkValidator<BotTemplate>((raw) => {
     isStringArray(raw.workingRules)
   )
 }, 'bot_template')
+
+// ---------------------------------------------------------------
+// 工作流（Workflow）+ 工作流步骤（WorkflowStep）
+// 文档对齐：V0.3 §13 工作流用户自定义；V0.1 对齐说明 §18 已对齐项。
+// ---------------------------------------------------------------
+
+export interface WorkflowStep {
+  /** 步骤 id（同一 workflow 内唯一）。 */
+  id: string
+  /** 显示/排序顺序（小 → 大）。segment 1 同时保留 order 和 nextStepId：
+   *  order 用于排序展示，nextStepId 用于运行时显式跳转（可跳跃、可分支）。 */
+  order: number
+  /** 谁来做（哪个 Bot）。如果为空表示"等用户决策"。 */
+  workerBotId?: string
+  /** 下一步 id。如果为空表示流程结束。 */
+  nextStepId?: string
+  /** 这一步做什么（人话描述）。 */
+  description?: string
+}
+
+export interface Workflow {
+  id: string
+  workspaceId: string
+  /** 工作流名（用户起的，例如"开发→审核→汇报"）。 */
+  name: string
+  /** 步骤列表（不一定按 order 排序，由调用方决定展示顺序）。 */
+  steps: WorkflowStep[]
+  createdAt: string
+  updatedAt: string
+}
+
+export const workflowStepValidator = mkValidator<WorkflowStep>((raw) => {
+  if (!isObject(raw)) return false
+  return (
+    isString(raw.id) &&
+    typeof raw.order === 'number' &&
+    (raw.workerBotId === undefined || isString(raw.workerBotId)) &&
+    (raw.nextStepId === undefined || isString(raw.nextStepId)) &&
+    (raw.description === undefined || isString(raw.description))
+  )
+}, 'workflow_step')
+
+export const workflowValidator = mkValidator<Workflow>((raw) => {
+  if (!isObject(raw)) return false
+  if (!Array.isArray(raw.steps)) return false
+  // 每一步都过校验器
+  for (const step of raw.steps) {
+    if (!workflowStepValidator.parse(step as unknown)) return false
+  }
+  return (
+    isString(raw.id) &&
+    isString(raw.workspaceId) &&
+    isString(raw.name) &&
+    isString(raw.createdAt) &&
+    isString(raw.updatedAt)
+  )
+}, 'workflow')
+
+// ---------------------------------------------------------------
+// 任务（Task）
+// 文档对齐：V0.3 §15（Task 是工作单）、§16（Task ≠ Session）、§18（任务状态）。
+// ---------------------------------------------------------------
+
+export type TaskStatus =
+  | 'planned'         // 已规划
+  | 'ready'           // 可开始
+  | 'developing'      // 开发中
+  | 'dev_done'        // 开发完成
+  | 'reviewing'       // 审核中
+  | 'changes_req'     // 需修改
+  | 're_reviewing'    // 再审核
+  | 'pass'            // 审核通过
+  | 'wait_owner'      // 等待用户决策
+  | 'done'            // 完成
+  | 'blocked'         // 阻塞
+
+/** TaskStatus 的中文显示（V0.3 §18："界面显示中文即可"）。 */
+export const TASK_STATUS_LABELS: Readonly<Record<TaskStatus, string>> = {
+  planned: '已规划',
+  ready: '可开始',
+  developing: '开发中',
+  dev_done: '开发完成',
+  reviewing: '审核中',
+  changes_req: '需修改',
+  re_reviewing: '再审核',
+  pass: '审核通过',
+  wait_owner: '等待用户决策',
+  done: '完成',
+  blocked: '阻塞',
+}
+
+export interface Task {
+  id: string
+  workspaceId: string
+  /** 所属模块（V0.3 §14；segment 1 不引入 Module 实体，先占位字符串）。 */
+  moduleId?: string
+  /** 工作流绑定（可选）。 */
+  workflowId?: string
+  /** 工作流步骤绑定（可选）。 */
+  workflowStepId?: string
+  /** 任务标题（人话）。 */
+  title: string
+  /** 任务说明/规格。 */
+  description?: string
+  /** 谁负责执行（Bot id）。 */
+  ownerBotId: string
+  /** 任务状态。 */
+  status: TaskStatus
+  /** 由谁创建。 */
+  createdBy: 'user' | 'bot'
+  createdAt: string
+  updatedAt: string
+  /** 完成时间（status=done 时填）。 */
+  completedAt?: string
+}
+
+const TASK_STATUS_VALUES: readonly TaskStatus[] = [
+  'planned', 'ready', 'developing', 'dev_done', 'reviewing',
+  'changes_req', 're_reviewing', 'pass', 'wait_owner', 'done', 'blocked',
+]
+const isTaskStatus = (v: unknown): v is TaskStatus =>
+  typeof v === 'string' && (TASK_STATUS_VALUES as readonly string[]).includes(v)
+
+export const taskValidator = mkValidator<Task>((raw) => {
+  if (!isObject(raw)) return false
+  return (
+    isString(raw.id) &&
+    isString(raw.workspaceId) &&
+    (raw.moduleId === undefined || isString(raw.moduleId)) &&
+    (raw.workflowId === undefined || isString(raw.workflowId)) &&
+    (raw.workflowStepId === undefined || isString(raw.workflowStepId)) &&
+    isString(raw.title) &&
+    (raw.description === undefined || isString(raw.description)) &&
+    isString(raw.ownerBotId) &&
+    isTaskStatus(raw.status) &&
+    (raw.createdBy === 'user' || raw.createdBy === 'bot') &&
+    isString(raw.createdAt) &&
+    isString(raw.updatedAt) &&
+    (raw.completedAt === undefined || isString(raw.completedAt))
+  )
+}, 'task')
+
+// ---------------------------------------------------------------
+// 审计事件（AuditEvent）
+// 文档对齐：V0.2 §22 AuditEvent。原文 metadata 是必填 Record<string, unknown>，
+// 这里允许 undefined（自动归一为 {}）以减少调用方负担。
+// ---------------------------------------------------------------
+
+export type AuditActorType = 'user' | 'bot' | 'system'
+
+export interface AuditEvent {
+  id: string
+  workspaceId: string
+  actorType: AuditActorType
+  actorId: string
+  action: string
+  resourceType: string
+  resourceId: string
+  metadata: Record<string, unknown>
+  timestamp: string
+}
+
+const isActorType = (v: unknown): v is AuditActorType =>
+  v === 'user' || v === 'bot' || v === 'system'
+
+export const auditEventValidator = mkValidator<AuditEvent>((raw) => {
+  if (!isObject(raw)) return false
+  // metadata 允许 undefined 或 Record；运行时归一为 {}
+  const meta = raw.metadata
+  if (meta !== undefined && (typeof meta !== 'object' || meta === null || Array.isArray(meta))) {
+    return false
+  }
+  return (
+    isString(raw.id) &&
+    isString(raw.workspaceId) &&
+    isActorType(raw.actorType) &&
+    isString(raw.actorId) &&
+    isString(raw.action) &&
+    isString(raw.resourceType) &&
+    isString(raw.resourceId) &&
+    isString(raw.timestamp)
+  )
+}, 'audit_event')
