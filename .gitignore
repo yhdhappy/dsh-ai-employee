@@ -1,0 +1,49 @@
+# ---- Node.js / TypeScript ----
+node_modules/
+lib/
+dist/
+build/
+*.tsbuildinfo
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.cache/
+
+# 注意：pnpm-lock.yaml 应提交进仓库，保证 CI 与本地依赖可复现，勿忽略。
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ---- 环境与密钥 ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+
+# ---- DeepSeek Harness / 会话数据（本地运行产生，不放仓库） ----
+.dsh/
+sessions/
+storages/
+attachments/
+profile/
+*.session.jsonl
+
+# ---- 覆盖测试生成的运行时文件 / 工具产物 ----
+coverage/
+.nyc_output/
+tmp/
+*.tmp
+
+# ---- 编辑器 ----
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo

@@ -1,0 +1,66 @@
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  # 也允许手动触发，方便调试
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-review:
+    name: AI 审核 PR
+    runs-on: ubuntu-latest
+    # 需要 DEEPSEEK_API_KEY；未配置时跳过不报错
+    if: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build PR diff
+        id: diff
+        run: |
+          BASE_REF="${GITHUB_BASE_REF:-main}"
+          if git rev-parse --verify "origin/$BASE_REF" >/dev/null 2>&1; then
+            git diff "origin/$BASE_REF...HEAD" > pr.diff || true
+          else
+            git diff "origin/main...HEAD" > pr.diff || true
+          fi
+          echo "diff bytes: $(wc -c < pr.diff)"
+
+      - name: Run AI review script
+        id: review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+          DEEPSEEK_DIFF_FILE: pr.diff
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set +e
+          node scripts/ai-review.mjs > review-output.md 2> review-meta.txt
+          code=$?
+          set -e
+          echo "review-exit=$code" >> "$GITHUB_OUTPUT"
+          cat review-output.md
+
+      - name: Post review as PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -f review-output.md ]; then
+            gh pr comment "$PR_URL" --body-file review-output.md 2>/dev/null || \
+            echo "无法发布评论（可能是只读 token 或重复评论），审核输出如下：" && cat review-output.md
+          fi

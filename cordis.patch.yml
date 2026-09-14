@@ -1,0 +1,11 @@
+# dsh-ai-employee：给每个项目配一个 AI 团队
+#
+# 当前为仓库初始化占位：声明插件 row，但不注册任何能力。
+# Phase 1 起在此填 build/insert 条目，把 ai-employee-plugin 挂进 profile。
+#
+# 说明：Cordis 通过 `name` 解析实际包。本地开发阶段用 dsh plugin add 安装
+# 本工程时，`name` 会指向安装后的包路径；正式发布后指向 @yhdhappy/dsh-ai-employee。
+#
+# - insert:
+#     - id: ai-employee-plugin
+#       name: '@yhdhappy/dsh-ai-employee'
