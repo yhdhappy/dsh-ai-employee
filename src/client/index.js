@@ -149,7 +149,7 @@ function loadState() {
 
 // -------------------- 组件 --------------------
 function AiEmployeePanel() {
-  var s = useState({ hasWorkspace: false, workspace: null, bots: [] })
+  var s = useState({ hasWorkspace: false, workspace: null, bots: [], workflows: [] })
   var state = s[0]; var setState = s[1]
   var errS = useState(null); var error = errS[0]; var setError = errS[1]
   var busyS = useState(false); var busy = busyS[0]; var setBusy = busyS[1]
@@ -160,6 +160,14 @@ function AiEmployeePanel() {
   var botTemplateS = useState('advisor'); var botTemplate = botTemplateS[0]; var setBotTemplate = botTemplateS[1]
 
   var selectedBotS = useState(null); var selectedBot = selectedBotS[0]; var setSelectedBot = selectedBotS[1]
+
+  // ---- 工作流表单状态 ----
+  // wfName: 工作流名；wfSteps: [{ botId }] 按顺序的步骤（每步选一个员工）；
+  // wfOpen: 表单是否展开
+  var wfNameS = useState(''); var wfName = wfNameS[0]; var setWfName = wfNameS[1]
+  var wfStepsS = useState(['', '']); var wfSteps = wfStepsS[0]; var setWfSteps = wfStepsS[1]
+  var wfOpenS = useState(false); var wfOpen = wfOpenS[0]; var setWfOpen = wfOpenS[1]
+  var wfDetailS = useState(null); var wfDetail = wfDetailS[0]; var setWfDetail = wfDetailS[1]
 
   function reload() {
     setBusy(true); setError(null)
@@ -196,6 +204,73 @@ function AiEmployeePanel() {
       if (!r.ok) throw new Error(r.error || '创建失败')
       reload()
     }).catch(function (e) { setError(e.message || String(e)); setBusy(false) })
+  }
+
+  // ---- 工作流：步骤行操作 ----
+  function setStepBot(idx, botId) {
+    setWfSteps(function (prev) {
+      var next = prev.slice()
+      next[idx] = botId
+      return next
+    })
+  }
+  function addStep() {
+    setWfSteps(function (prev) { return prev.concat(['']) })
+  }
+  function removeStep(idx) {
+    setWfSteps(function (prev) {
+      if (prev.length <= 1) return prev
+      var next = prev.slice()
+      next.splice(idx, 1)
+      return next
+    })
+  }
+
+  // ---- 工作流：提交 ----
+  // 把「步骤 1 选谁、步骤 2 选谁…」串成线性链：s1 → s2 → … → sN（最后一棒结束）。
+  // 每步的 nextStepId 由前端按顺序算好，交给后端 service 再做一致性校验。
+  function submitCreateWorkflow(e) {
+    e.preventDefault()
+    if (busy) return
+    if (!state.workspace) return
+    var name = wfName.trim()
+    if (!name) { setError('工作流名不能为空'); return }
+    var picked = wfSteps.filter(function (x) { return x && x !== '' })
+    if (picked.length === 0) { setError('至少要选一个员工作为步骤'); return }
+
+    var steps = picked.map(function (botId, i) {
+      var step = {
+        id: 's' + (i + 1),
+        order: i + 1,
+        workerBotId: botId,
+      }
+      if (i < picked.length - 1) step.nextStepId = 's' + (i + 2)
+      return step
+    })
+
+    setBusy(true); setError(null)
+    callApi('createWorkflow', {
+      workspaceId: state.workspace.id,
+      name: name,
+      steps: steps,
+    }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || '创建失败')
+      setWfName('')
+      setWfSteps(['', ''])
+      setWfOpen(false)
+      reload()
+    }).catch(function (e2) { setError(e2.message || String(e2)); setBusy(false) })
+  }
+
+  /** 把 workflow 的步骤渲染成人话，例如「程序员 → 审核员」。 */
+  function describeWorkflow(wf) {
+    var botsById = {}
+    ;(state.bots || []).forEach(function (b) { botsById[b.id] = b.name })
+    var ordered = (wf.steps || []).slice().sort(function (a, b) { return a.order - b.order })
+    return ordered.map(function (st) {
+      if (!st.workerBotId) return '（等用户决策）'
+      return botsById[st.workerBotId] || st.workerBotId
+    }).join(' → ')
   }
 
   var hasWs = state.hasWorkspace
@@ -291,6 +366,98 @@ function AiEmployeePanel() {
             }, busy ? '处理中…' : '新建员工'),
             createElement('div', { style: hintStyle }, '员工名 = 样板默认名（总顾问/程序员/审核员/情报员）。改名留 Phase 2 编辑功能。'),
           ),
+
+          // ---------------- 工作流区 ----------------
+          createElement('div', { style: sectionTitleStyle },
+            '工作流（' + (state.workflows || []).length + '）'),
+
+          (state.workflows || []).length === 0
+            ? createElement('div', { style: hintStyle }, '还没有工作流。建一个，员工做完就会自动交给下一棒。')
+            : createElement('div', { style: { marginBottom: '6px' } },
+                state.workflows.map(function (wf) {
+                  var open = wfDetail && wfDetail.id === wf.id
+                  return createElement('div', {
+                    key: wf.id,
+                    style: Object.assign({}, chipStyle, { display: 'block', borderRadius: '6px', padding: '6px 9px' },
+                      open ? { background: '#dbe7ff', borderColor: '#2b6cff' } : {}),
+                    onClick: function () { setWfDetail(open ? null : wf) },
+                    title: '点击查看步骤详情',
+                  },
+                    createElement('div', { style: { fontWeight: 600, fontSize: '12px' } }, wf.name),
+                    createElement('div', { style: { fontSize: '11.5px', color: '#555', marginTop: '2px' } },
+                      describeWorkflow(wf)),
+                    open
+                      ? createElement('div', { style: { marginTop: '5px', fontSize: '11.5px', color: '#666' } },
+                          (wf.steps || []).slice().sort(function (a, b) { return a.order - b.order }).map(function (st) {
+                            return createElement('div', { key: st.id },
+                              '· 步骤 ' + st.order + '：' + st.id +
+                              (st.workerBotId ? '（员工 ' + st.workerBotId + '）' : '（等用户决策）') +
+                              (st.nextStepId ? ' → ' + st.nextStepId : ' → 结束'))
+                          }),
+                          createElement('div', { style: Object.assign({}, hintStyle, { marginTop: '4px' }) },
+                            'ID: ' + wf.id),
+                        )
+                      : null,
+                  )
+                }),
+              ),
+
+          !wfOpen
+            ? createElement('button', {
+                type: 'button', disabled: busy || (state.bots || []).length === 0,
+                style: busy || (state.bots || []).length === 0 ? buttonDisabledStyle : ghostButtonStyle,
+                onClick: function () { setWfOpen(true) },
+              }, (state.bots || []).length === 0 ? '先建员工才能建工作流' : '＋ 新建工作流')
+            : createElement('form', { onSubmit: submitCreateWorkflow, style: { marginTop: '6px' } },
+                createElement('div', { style: sectionTitleStyle }, '新建工作流'),
+                createElement('input', {
+                  type: 'text', placeholder: '工作流名（例如：开发→审核）',
+                  value: wfName, onChange: function (e) { setWfName(e.target.value) },
+                  style: inputStyle,
+                }),
+                createElement('div', { style: { fontSize: '11.5px', color: '#666', marginBottom: '4px' } },
+                  '按顺序选每一步由谁来做（最后一棒做完流程结束）：'),
+                wfSteps.map(function (chosen, idx) {
+                  return createElement('div', { key: idx, style: { display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '5px' } },
+                    createElement('span', { style: { fontSize: '11.5px', color: '#888', minWidth: '40px' } },
+                      '步骤 ' + (idx + 1)),
+                    createElement('select', {
+                      value: chosen,
+                      onChange: function (e) { setStepBot(idx, e.target.value) },
+                      style: Object.assign({}, selectStyle, { marginBottom: '0', flex: '1' }),
+                    },
+                      createElement('option', { value: '' }, '（等用户决策 / 不指派）'),
+                      (state.bots || []).map(function (b) {
+                        return createElement('option', { key: b.id, value: b.id }, b.name + ' · ' + b.role)
+                      }),
+                    ),
+                    createElement('button', {
+                      type: 'button', onClick: function () { removeStep(idx) },
+                      disabled: wfSteps.length <= 1,
+                      style: Object.assign({}, ghostButtonStyle, {
+                        padding: '2px 7px',
+                        color: wfSteps.length <= 1 ? '#bbb' : '#c0392b',
+                        borderColor: wfSteps.length <= 1 ? '#ddd' : '#c0392b',
+                      }),
+                    }, '×'),
+                  )
+                }),
+                createElement('div', { style: { display: 'flex', gap: '6px', marginTop: '4px' } },
+                  createElement('button', {
+                    type: 'button', onClick: addStep, style: ghostButtonStyle,
+                  }, '＋ 加一步'),
+                  createElement('button', {
+                    type: 'submit', disabled: busy,
+                    style: busy ? buttonDisabledStyle : buttonStyle,
+                  }, busy ? '处理中…' : '建工作流'),
+                  createElement('button', {
+                    type: 'button', onClick: function () { setWfOpen(false); setError(null) },
+                    style: Object.assign({}, ghostButtonStyle, { color: '#888', borderColor: '#ccc' }),
+                  }, '取消'),
+                ),
+                createElement('div', { style: hintStyle },
+                  '步骤会串成线性链：步骤1 → 步骤2 → … → 结束。选「等用户决策」的步骤不派人，流程会停下等你。'),
+              ),
         ),
   )
 }

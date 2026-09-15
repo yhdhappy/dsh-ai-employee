@@ -19,15 +19,20 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WorkspaceService } from '../workspace/workspace-service.js'
 import type { BotService } from '../bots/bot-service.js'
-import type { Bot } from '../storage/schemas.js'
+import type { WorkflowService } from '../workflows/workflow-service.js'
+import type { Bot, Workflow, WorkflowStep } from '../storage/schemas.js'
 import type { AuditService } from '../audit/audit-service.js'
 import { allTemplates } from '../core/template-service.js'
 
 export interface AiEmployeeApi {
   workspaces: WorkspaceService
   bots: BotService
-  /** 审计服务（Phase 2 第一段加入）；缺失时 listAuditEvents 返回空。 */
+  /** 工作流服务（Phase 2 第三段 UI 集成加入）。 */
+  workflows?: WorkflowService
+  /** 审计服务（Phase 2 第一段加入）；缺失时不写审计、listAuditEvents 返回空。 */
   audit?: AuditService
+  /** 创建者身份（审计用）；默认 'user-1'。 */
+  userId?: string
 }
 
 export interface AiEmployeeHandlerDeps {
@@ -94,6 +99,24 @@ function toBotDto(b: Bot) {
   }
 }
 
+/** 工作流 DTO：只暴露前端需要展示的字段（v1 不做工作流编辑，先只读 + 新建）。 */
+function toWorkflowDto(w: Workflow) {
+  return {
+    id: w.id,
+    workspaceId: w.workspaceId,
+    name: w.name,
+    steps: w.steps.map((s) => ({
+      id: s.id,
+      order: s.order,
+      workerBotId: s.workerBotId ?? null,
+      nextStepId: s.nextStepId ?? null,
+      description: s.description ?? null,
+    })),
+    createdAt: w.createdAt,
+    updatedAt: w.updatedAt,
+  }
+}
+
 /** 构造路由 handler。 */
 export function makeAiEmployeeHandler(deps: AiEmployeeHandlerDeps) {
   const { api, userId } = deps
@@ -126,14 +149,104 @@ export function makeAiEmployeeHandler(deps: AiEmployeeHandlerDeps) {
           const workspaces = api.workspaces.listWorkspaces()
           const workspace = workspaces[0]
           const bots = workspace ? api.bots.listBotsByWorkspace(workspace.id) : []
+          const workflows = workspace && api.workflows !== undefined
+            ? api.workflows.listByWorkspace(workspace.id)
+            : []
           sendJson(res, 200, {
             ok: true,
             state: {
               hasWorkspace: workspaces.length > 0,
               workspace: workspace ?? null,
               bots: bots.map(toBotDto),
+              workflows: workflows.map(toWorkflowDto),
             },
           })
+          return
+        }
+
+        case 'listBots': {
+          const workspaceId = String(body.workspaceId ?? '').trim()
+          if (!workspaceId) {
+            sendJson(res, 400, { ok: false, error: 'workspaceId 不能为空' })
+            return
+          }
+          const list = api.bots.listBotsByWorkspace(workspaceId)
+          sendJson(res, 200, { ok: true, bots: list.map(toBotDto) })
+          return
+        }
+
+        case 'listWorkflows': {
+          if (api.workflows === undefined) {
+            sendJson(res, 200, { ok: true, workflows: [] })
+            return
+          }
+          const workspaceId = String(body.workspaceId ?? '').trim()
+          if (!workspaceId) {
+            sendJson(res, 400, { ok: false, error: 'workspaceId 不能为空' })
+            return
+          }
+          const list = api.workflows.listByWorkspace(workspaceId)
+          sendJson(res, 200, { ok: true, workflows: list.map(toWorkflowDto) })
+          return
+        }
+
+        case 'createWorkflow': {
+          if (api.workflows === undefined) {
+            sendJson(res, 400, { ok: false, error: '工作流服务不可用' })
+            return
+          }
+          const workspaceId = String(body.workspaceId ?? '').trim()
+          const name = String(body.name ?? '').trim()
+          if (!workspaceId) {
+            sendJson(res, 400, { ok: false, error: 'workspaceId 不能为空' })
+            return
+          }
+          if (!name) {
+            sendJson(res, 400, { ok: false, error: '工作流名不能为空' })
+            return
+          }
+          const rawSteps = Array.isArray(body.steps) ? body.steps : []
+          if (rawSteps.length === 0) {
+            sendJson(res, 400, { ok: false, error: '工作流至少要有一个步骤' })
+            return
+          }
+          // 归一化：缺 id/order 自动补；workerBotId / nextStepId 空串视为未设置
+          const steps: WorkflowStep[] = rawSteps.map((raw, i) => {
+            const s = (raw ?? {}) as Record<string, unknown>
+            const step: WorkflowStep = {
+              id: typeof s.id === 'string' && s.id.trim() !== '' ? s.id.trim() : `s${i + 1}`,
+              order: typeof s.order === 'number' && Number.isFinite(s.order) ? s.order : i + 1,
+            }
+            if (typeof s.workerBotId === 'string' && s.workerBotId.trim() !== '') {
+              step.workerBotId = s.workerBotId.trim()
+            }
+            if (typeof s.nextStepId === 'string' && s.nextStepId.trim() !== '') {
+              step.nextStepId = s.nextStepId.trim()
+            }
+            if (typeof s.description === 'string' && s.description.trim() !== '') {
+              step.description = s.description.trim()
+            }
+            return step
+          })
+          // 交给 service 做一致性校验（nextStepId 越界等由它拒绝）
+          const wf = await api.workflows.createWorkflow({ workspaceId, name, steps })
+          if (api.audit !== undefined) {
+            await api.audit.record({
+              workspaceId,
+              actorType: 'user',
+              actorId: api.userId ?? userId,
+              action: 'workflow.create',
+              resourceType: 'workflow',
+              resourceId: wf.id,
+              metadata: {
+                name: wf.name,
+                stepCount: wf.steps.length,
+                stepIds: wf.steps.map((x) => x.id),
+                via: 'ui',
+              },
+            })
+          }
+          sendJson(res, 200, { ok: true, workflow: toWorkflowDto(wf) })
           return
         }
 
@@ -145,6 +258,17 @@ export function makeAiEmployeeHandler(deps: AiEmployeeHandlerDeps) {
             return
           }
           const ws = await api.workspaces.createWorkspace({ name, rootPath, ownerUserId: userId })
+          if (api.audit !== undefined) {
+            await api.audit.record({
+              workspaceId: ws.id,
+              actorType: 'user',
+              actorId: userId,
+              action: 'workspace.create',
+              resourceType: 'workspace',
+              resourceId: ws.id,
+              metadata: { name: ws.name, rootPath: ws.rootPath, via: 'ui' },
+            })
+          }
           sendJson(res, 200, { ok: true, workspace: ws })
           return
         }
@@ -182,6 +306,22 @@ export function makeAiEmployeeHandler(deps: AiEmployeeHandlerDeps) {
             role,
             actor,
           })
+          if (api.audit !== undefined) {
+            await api.audit.record({
+              workspaceId,
+              actorType: 'user',
+              actorId: userId,
+              action: 'bot.create',
+              resourceType: 'bot',
+              resourceId: bot.id,
+              metadata: {
+                name: bot.name,
+                role: bot.role,
+                templateId: templateId ?? null,
+                via: 'ui',
+              },
+            })
+          }
           sendJson(res, 200, { ok: true, bot: toBotDto(bot) })
           return
         }

@@ -138,6 +138,78 @@ check('R12 createBot 传 name 时按传的来', r.status === 200 && r.body && r.
 r = await callHandler(handler, 'POST', { action: 'createWorkspace', name: '', rootPath: '' })
 check('R13 错误体含 ok:false 与 error', r.status === 400 && r.body && r.body.ok === false && typeof r.body.error === 'string')
 
+// ---------- Phase 2 第三段：工作流 + 列表 + UI 审计 ----------
+console.log('\n=== R14+ 工作流路由 / 列表 / UI 审计 ===\n')
+
+// 拿两个 bot 供工作流用
+const programmer = (await callHandler(handler, 'POST', { action: 'createBot', workspaceId: wsId, templateId: 'programmer' })).body.bot
+const reviewer = (await callHandler(handler, 'POST', { action: 'createBot', workspaceId: wsId, templateId: 'reviewer' })).body.bot
+
+// R14 listBots（此前 R8/R12 已各建 1 个，本段再建 2 个 → 共 4）
+r = await callHandler(handler, 'POST', { action: 'listBots', workspaceId: wsId })
+check('R14 listBots 返回全部员工', r.status === 200 && r.body.ok === true && r.body.bots.length === 4, `实际 ${r.body.bots.length}`)
+r = await callHandler(handler, 'POST', { action: 'listBots' })
+check('R14 listBots 缺 workspaceId 返回 400', r.status === 400 && r.body.error.includes('workspaceId'))
+
+// R15 createWorkflow - 成功（线性链 s1→s2）
+r = await callHandler(handler, 'POST', {
+  action: 'createWorkflow', workspaceId: wsId, name: '开发→审核',
+  steps: [
+    { workerBotId: programmer.id },
+    { workerBotId: reviewer.id },
+  ],
+})
+check('R15 createWorkflow 成功', r.status === 200 && r.body.ok === true && r.body.workflow.steps.length === 2)
+check('R15 自动补 id/order', r.body.workflow.steps[0].id === 's1' && r.body.workflow.steps[0].order === 1)
+check('R15 DTO 字段可用', r.body.workflow.name === '开发→审核' && r.body.workflow.steps[0].workerBotId === programmer.id)
+const wfId = r.body.workflow.id
+
+// R16 createWorkflow 校验
+r = await callHandler(handler, 'POST', { action: 'createWorkflow', workspaceId: wsId, steps: [{ workerBotId: programmer.id }] })
+check('R16 缺 name 返回 400', r.status === 400 && r.body.error.includes('工作流名'))
+r = await callHandler(handler, 'POST', { action: 'createWorkflow', workspaceId: wsId, name: 'x', steps: [] })
+check('R16 空 steps 返回 400', r.status === 400 && r.body.error.includes('至少要有一个步骤'))
+r = await callHandler(handler, 'POST', { action: 'createWorkflow', workspaceId: wsId, name: 'x' })
+check('R16 缺 steps 返回 400', r.status === 400 && r.body.error.includes('至少要有一个步骤'))
+
+// R17 nextStepId 越界由 service 层拒绝
+r = await callHandler(handler, 'POST', {
+  action: 'createWorkflow', workspaceId: wsId, name: 'bad',
+  steps: [{ id: 'a', order: 1, workerBotId: programmer.id, nextStepId: 'ghost' }],
+})
+check('R17 nextStepId 越界被 service 层拒绝（500 + 可读错误）',
+  r.status === 500 && r.body.ok === false && /nextStepId/.test(r.body.error))
+
+// R18 等用户决策步骤（无 workerBotId）
+r = await callHandler(handler, 'POST', {
+  action: 'createWorkflow', workspaceId: wsId, name: '带等待',
+  steps: [{ id: 'a', order: 1, workerBotId: programmer.id, nextStepId: 'b' },
+          { id: 'b', order: 2, description: '等用户拍板' }],
+})
+check('R18 无 workerBotId 的步骤允许', r.status === 200 && r.body.workflow.steps[1].workerBotId === null)
+
+// R19 listWorkflows（R15 与 R18 各成功 1 条 → 共 2）
+r = await callHandler(handler, 'POST', { action: 'listWorkflows', workspaceId: wsId })
+check('R19 listWorkflows 返回 2 条', r.status === 200 && r.body.workflows.length === 2, `实际 ${r.body.workflows.length}`)
+r = await callHandler(handler, 'POST', { action: 'listWorkflows' })
+check('R19 listWorkflows 缺 workspaceId 返回 400', r.status === 400)
+
+// R20 state 现在带 workflows
+r = await callHandler(handler, 'POST', { action: 'state' })
+check('R20 state 含 workflows 数组', r.status === 200 && Array.isArray(r.body.state.workflows) && r.body.state.workflows.length === 2)
+
+// R21 UI 操作写审计（via='ui'）
+r = await callHandler(handler, 'POST', { action: 'listAuditEvents', workspaceId: wsId, limit: 100 })
+const evts = r.body.events
+const uiWf = evts.filter((e) => e.action === 'workflow.create' && e.metadata.via === 'ui')
+const uiBot = evts.filter((e) => e.action === 'bot.create' && e.metadata.via === 'ui')
+const uiWs = evts.filter((e) => e.action === 'workspace.create' && e.metadata.via === 'ui')
+check('R21 UI 建工作流记了审计（2 条）', uiWf.length === 2, `实际 ${uiWf.length}`)
+check('R21 UI 建员工记了审计（4 条）', uiBot.length === 4, `实际 ${uiBot.length}`)
+check('R21 UI 建项目记了审计（1 条）', uiWs.length === 1)
+check('R21 审计 actorType=user', uiWf[0].actorType === 'user' && uiWf[0].actorId === 'user-1')
+check('R21 工作流审计带 stepIds', Array.isArray(uiWf[0].metadata.stepIds) && uiWf[0].metadata.stepIds.length === 2)
+
 await api.dispose()
 
 console.log(`\n=== 结果：通过 ${pass} / 共 ${pass + fail} ===`)
