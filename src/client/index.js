@@ -26,7 +26,9 @@ var panelStyle = {
   right: '20px',
   bottom: '20px',
   width: '340px',
-  maxHeight: '70vh',
+  // 面板装了「建项目 / 员工列表 / 工作流表单」后会长过视口高度，
+  // 必须可滚动，否则下面的内容看不到也够不着。
+  maxHeight: '80vh',
   background: '#ffffff',
   color: '#1a1a1a',
   border: '1px solid #d0d0d6',
@@ -37,7 +39,9 @@ var panelStyle = {
   fontSize: '13px',
   lineHeight: '1.5',
   zIndex: 2147483600,
-  overflow: 'hidden',
+  overflowY: 'auto',
+  overflowX: 'hidden',
+  overscrollBehavior: 'contain',
   display: 'flex',
   flexDirection: 'column',
 }
@@ -295,15 +299,15 @@ function AiEmployeePanel() {
 
     error ? createElement('div', { style: errorStyle }, error) : null,
 
-    // 对话式入口提示：告诉用户"跟总顾问说"这条路怎么走
+    // 对话式入口提示：告诉用户"跟 AI 助手说"这条路怎么走
     createElement('div', { style: chatHintStyle },
       createElement('div', { style: { fontWeight: 600 } }, '💬 想对话式搭团队？'),
-      createElement('div', { style: { marginTop: '2px' } },
-        '去主对话里对总顾问说一句，例如：'),
-      createElement('div', { style: { marginTop: '2px', fontStyle: 'italic' } },
-        '「帮我搭个团队：先让程序员干，干完交给审核员」'),
+      createElement('div', { style: { marginTop: '3px' } },
+        '去中间的主对话窗口，跟 AI 助手说一句，例如：'),
+      createElement('div', { style: { marginTop: '3px', fontStyle: 'italic' } },
+        '「帮我搭个团队：建个项目、几个员工、一个工作流」'),
       createElement('div', { style: { marginTop: '3px', fontSize: '11px', color: '#5b78a8' } },
-        '总顾问会自动建项目 / 员工 / 工作流，并把任务派下去跑完整条链。'),
+        'AI 助手会自动调用本插件的工具把项目 / 员工 / 工作流 / 任务建出来。'),
     ),
 
     !hasWs
