@@ -135,14 +135,15 @@ export function apply(ctx: Context): void {
       // 注册内存 Tool（模型可见）
       const tools = createMemoryToolDefinitions({ memory: created.memory })
 
-      // 注册装配 Tool：建项目 / 建员工 / 建工作流
+      // 注册装配 Tool：建项目 / 建员工 / 建工作流 / 建任务
       // （V0.3 §13.3「方式 A：跟总顾问说」的基础设施）
       tools.push(...createSetupToolDefinitions({
         workspaces: created.workspaces,
         bots: created.bots,
         workflows: created.workflows,
+        tasks: created.tasks,
         ...(created.audit !== undefined ? { audit: created.audit } : {}),
-        // 被派发的员工不能建项目/员工/工作流；无 sessions（无 subagents）时视为没有员工在跑
+        // 被派发的员工不能建项目/员工/工作流/任务；无 sessions 时视为没有员工在跑
         isDispatchedEmployee: (id) => created.sessions?.isDispatchedEmployee(id) ?? false,
         userId: 'user-1',
       }))

@@ -23,8 +23,10 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { WorkspaceService } from '../workspace/workspace-service.js'
 import type { BotService } from '../bots/bot-service.js'
 import type { WorkflowService } from '../workflows/workflow-service.js'
+import type { TaskService } from '../tasks/task-service.js'
 import type { WorkflowStep } from '../storage/schemas.js'
 import type { AuditService } from '../audit/audit-service.js'
+import { TASK_STATUS_LABELS } from '../storage/schemas.js'
 import { allTemplates } from './template-service.js'
 
 function textBlock(text: string): ContentBlock[] {
@@ -35,6 +37,8 @@ export interface SetupToolsDeps {
   workspaces: WorkspaceService
   bots: BotService
   workflows: WorkflowService
+  /** 任务服务（task_create 用）；缺失时 task_create 不注册。 */
+  tasks?: TaskService
   audit?: AuditService
   /** 判断某个 agent/session 是否是"被派发的员工"。 */
   isDispatchedEmployee: (agentId: string | undefined) => boolean
@@ -54,7 +58,6 @@ function assertNotEmployee(deps: SetupToolsDeps, agentId: string | undefined, wh
 
 export function createSetupToolDefinitions(deps: SetupToolsDeps): ToolDefinition[] {
   const { workspaces, bots, workflows, audit } = deps
-
   // ---------------------------------------------------------------
   // workspace_create
   // ---------------------------------------------------------------
@@ -267,5 +270,169 @@ export function createSetupToolDefinitions(deps: SetupToolsDeps): ToolDefinition
     },
   })
 
-  return [workspaceCreate, botCreate, workflowCreate]
+  // ---------------------------------------------------------------
+  // task_create
+  // 让"对话式"闭环打通：建项目 → 建员工 → 建工作流 → **建任务**。
+  // 没有它，AI 助手搭完团队就没法让团队真正开始干活。
+  // ---------------------------------------------------------------
+  const taskCreate = defineTool({
+    name: 'task_create',
+    description:
+      '在指定项目下创建一个任务（工作单）。任务默认状态是「已规划」，之后可以用 task_dispatch 派给负责员工执行。' +
+      '如果传了 workflowId，任务会挂到该工作流的某个步骤上（不传 workflowStepId 就挂到第一步），' +
+      '负责人从该步骤的 workerBotId 取。不传 workflowId 时任务独立，需要自己指定 ownerBotId。',
+    parameters: {
+      workspaceId: { type: 'string', required: true, description: '项目 id' },
+      title: { type: 'string', required: true, description: '任务名（人话，例如「想一个记账 App 的方案」）' },
+      description: { type: 'string', description: '任务说明 / 规格（可选）' },
+      workflowId: { type: 'string', description: '关联的工作流 id（可选）' },
+      workflowStepId: {
+        type: 'string',
+        description: '关联到工作流的哪一步（可选；只给 workflowId 时默认第一步）',
+      },
+      ownerBotId: {
+        type: 'string',
+        description: '负责员工 id（可选）。挂工作流时自动取该步骤的 workerBotId；独立任务必须给。',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          title: { type: 'string' },
+          status: { type: 'string' },
+          statusZh: { type: 'string' },
+          ownerBotId: { type: 'string' },
+          ownerBotName: { type: 'string' },
+          workflowId: { type: 'string' },
+          workflowStepId: { type: 'string' },
+        },
+      },
+      render: (_args, value) =>
+        textBlock(
+          `已创建任务「${value.title}」\n` +
+          `- id: ${value.id}\n` +
+          `- 状态: ${value.statusZh}\n` +
+          `- 负责员工: ${value.ownerBotName || value.ownerBotId}\n` +
+          (value.workflowId
+            ? `- 工作流: ${value.workflowId}${value.workflowStepId ? `（步骤 ${value.workflowStepId}）` : ''}\n`
+            : '') +
+          `\n下一步：调用 task_dispatch（taskId=${value.id}）即可让该员工开始干活；` +
+          '若任务挂了工作流，会自动沿流程把后续棒次派下去。',
+        ),
+    },
+    async execute(
+      args: {
+        workspaceId: string
+        title: string
+        description?: string
+        workflowId?: string
+        workflowStepId?: string
+        ownerBotId?: string
+      },
+      exec,
+    ) {
+      if (deps.tasks === undefined) {
+        throw new Error('任务服务不可用，无法创建任务')
+      }
+      const taskSvc = deps.tasks
+      assertNotEmployee(deps, exec.agent?.id, '创建任务')
+
+      const workspaceId = String(args.workspaceId ?? '').trim()
+      if (!workspaceId) throw new Error('workspaceId 不能为空')
+      const title = String(args.title ?? '').trim()
+      if (!title) throw new Error('title 不能为空')
+
+      const workflowId = typeof args.workflowId === 'string' ? args.workflowId.trim() : ''
+      let workflowStepId = typeof args.workflowStepId === 'string' ? args.workflowStepId.trim() : ''
+      let ownerBotId = typeof args.ownerBotId === 'string' ? args.ownerBotId.trim() : ''
+
+      // 挂工作流：解析出要绑的步骤，并从步骤取负责人
+      if (workflowId !== '') {
+        const wf = workflows.getWorkflow(workflowId)
+        if (wf === undefined) throw new Error(`工作流不存在：${workflowId}`)
+        if (wf.workspaceId !== workspaceId) {
+          throw new Error(`工作流 ${workflowId} 不属于项目 ${workspaceId}`)
+        }
+        const ordered = workflows.listSteps(workflowId) // 已按 order 升序
+        if (ordered.length === 0) throw new Error(`工作流 ${workflowId} 没有步骤`)
+
+        let step: WorkflowStep | undefined
+        if (workflowStepId !== '') {
+          step = workflows.getStep(workflowId, workflowStepId)
+          if (step === undefined) {
+            throw new Error(`工作流 ${workflowId} 里没有步骤 ${workflowStepId}`)
+          }
+        } else {
+          step = ordered[0] // 只给 workflowId → 挂第一步
+          if (step === undefined) throw new Error(`工作流 ${workflowId} 没有可用步骤`)
+          workflowStepId = step.id
+        }
+        // 负责人：优先显式传入，否则取步骤的 workerBotId
+        if (ownerBotId === '') ownerBotId = step.workerBotId ?? ''
+        if (ownerBotId === '') {
+          throw new Error(
+            `工作流步骤 ${workflowStepId} 没有指定执行员工（等用户决策步骤），` +
+            '请显式传 ownerBotId，或改挂到别的步骤。',
+          )
+        }
+      }
+
+      if (ownerBotId === '') {
+        throw new Error('独立任务必须指定 ownerBotId（负责员工）')
+      }
+      const bot = bots.getBot(ownerBotId)
+      if (bot === undefined) throw new Error(`员工不存在：${ownerBotId}`)
+
+      const task = await taskSvc.createTask({
+        workspaceId,
+        title,
+        ownerBotId,
+        createdBy: 'bot',
+        initialStatus: 'planned',
+        ...(args.description !== undefined && args.description.trim() !== ''
+          ? { description: args.description.trim() }
+          : {}),
+        ...(workflowId !== '' ? { workflowId } : {}),
+        ...(workflowStepId !== '' ? { workflowStepId } : {}),
+      })
+
+      if (audit !== undefined) {
+        await audit.record({
+          workspaceId,
+          actorType: 'bot',
+          actorId: exec.agent?.id ?? deps.userId,
+          action: 'task.create',
+          resourceType: 'task',
+          resourceId: task.id,
+          metadata: {
+            title: task.title,
+            status: task.status,
+            ownerBotId: task.ownerBotId,
+            workflowId: task.workflowId ?? null,
+            workflowStepId: task.workflowStepId ?? null,
+            via: 'tool',
+          },
+        })
+      }
+
+      return {
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        statusZh: TASK_STATUS_LABELS[task.status],
+        ownerBotId: task.ownerBotId,
+        ownerBotName: bot.name,
+        workflowId: task.workflowId ?? '',
+        workflowStepId: task.workflowStepId ?? '',
+      }
+    },
+  })
+
+  const all: ToolDefinition[] = [workspaceCreate, botCreate, workflowCreate]
+  // 任务服务可用时才注册 task_create（纯 UI/无 storage 场景可缺）
+  if (deps.tasks !== undefined) all.push(taskCreate)
+  return all
 }

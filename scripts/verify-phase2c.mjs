@@ -70,6 +70,7 @@ const tools = createSetupToolDefinitions({
   workspaces: api.workspaces,
   bots: api.bots,
   workflows: api.workflows,
+  tasks: api.tasks,
   audit: api.audit,
   isDispatchedEmployee: (id) => api.sessions?.isDispatchedEmployee(id) ?? false,
   userId: 'user-1',
@@ -190,6 +191,83 @@ const wf3 = await tool('workflow_create').execute({
 check('F6 无 workerBotId 的步骤被允许（等用户决策）',
   api.workflows.getWorkflow(wf3.id).steps[1].workerBotId === undefined)
 
+// ---------- task_create ----------
+console.log('\n=== task_create ===\n')
+
+check('K0 task_create 已注册', tool('task_create') !== undefined)
+
+// K1 独立任务：显式 ownerBotId
+const tk1 = await tool('task_create').execute({
+  workspaceId: w1.id, title: '想一个记账 App 的方案', ownerBotId: b1.id,
+  description: '给一个 MVP 功能清单',
+}, MAIN_EXEC)
+check('K1 独立任务创建成功', typeof tk1.id === 'string' && tk1.title === '想一个记账 App 的方案')
+check('K1 默认状态 = planned（已规划）', tk1.status === 'planned' && tk1.statusZh === '已规划')
+check('K1 返回负责员工名', tk1.ownerBotName === '程序员')
+check('K1 未绑工作流', tk1.workflowId === '' && tk1.workflowStepId === '')
+const tk1Saved = api.tasks.getTask(tk1.id)
+check('K1 落 storage（含 description）', tk1Saved !== undefined && tk1Saved.description === '给一个 MVP 功能清单')
+check('K1 createdBy=bot', tk1Saved.createdBy === 'bot')
+
+// K2 只给 workflowId → 自动挂第一步，owner 取该步的 workerBotId
+const tk2 = await tool('task_create').execute({
+  workspaceId: w1.id, title: '自动挂第一步', workflowId: wf1.id,
+}, MAIN_EXEC)
+check('K2 自动挂到第一步 step_1', tk2.workflowStepId === 'step_1')
+check('K2 owner 取自步骤 workerBotId', tk2.ownerBotId === b1.id)
+
+// K3 同时给 workflowId + workflowStepId → 挂指定步，owner 也取该步
+const tk3 = await tool('task_create').execute({
+  workspaceId: w1.id, title: '挂第二步', workflowId: wf1.id, workflowStepId: 'step_2',
+}, MAIN_EXEC)
+check('K3 挂到指定步 step_2', tk3.workflowStepId === 'step_2')
+check('K3 owner 取自该步（审核员）', tk3.ownerBotId === b2.id)
+
+// K4 显式 ownerBotId 覆盖步骤默认
+const tk4 = await tool('task_create').execute({
+  workspaceId: w1.id, title: '覆盖 owner', workflowId: wf1.id, workflowStepId: 'step_2', ownerBotId: b1.id,
+}, MAIN_EXEC)
+check('K4 显式 ownerBotId 优先', tk4.ownerBotId === b1.id)
+
+// K5 校验错误
+async function expectThrow(label, fn, re) {
+  let msg = ''
+  try { await fn() } catch (e) { msg = String(e?.message ?? e) }
+  check(label, re.test(msg), msg ? `得到：${msg.slice(0, 60)}` : '没有抛错')
+}
+await expectThrow('K5 缺 workspaceId 报错',
+  () => tool('task_create').execute({ title: 'x', ownerBotId: b1.id }, MAIN_EXEC), /workspaceId/)
+await expectThrow('K5 缺 title 报错',
+  () => tool('task_create').execute({ workspaceId: w1.id, ownerBotId: b1.id }, MAIN_EXEC), /title/)
+await expectThrow('K5 独立任务缺 ownerBotId 报错',
+  () => tool('task_create').execute({ workspaceId: w1.id, title: 'x' }, MAIN_EXEC), /ownerBotId/)
+await expectThrow('K5 工作流不存在报错',
+  () => tool('task_create').execute({ workspaceId: w1.id, title: 'x', workflowId: 'wf_ghost' }, MAIN_EXEC), /工作流不存在/)
+await expectThrow('K5 步骤不存在报错',
+  () => tool('task_create').execute({ workspaceId: w1.id, title: 'x', workflowId: wf1.id, workflowStepId: 'ghost' }, MAIN_EXEC), /没有步骤/)
+await expectThrow('K5 员工不存在报错',
+  () => tool('task_create').execute({ workspaceId: w1.id, title: 'x', ownerBotId: 'bot_ghost' }, MAIN_EXEC), /员工不存在/)
+await expectThrow('K5 工作流不属于本项目报错',
+  () => tool('task_create').execute({ workspaceId: seedWs.id, title: 'x', workflowId: wf1.id }, MAIN_EXEC), /不属于项目/)
+// "等用户决策"步骤没有 workerBotId，且没显式给 owner → 应报错并给出指引
+await expectThrow('K5 挂到无 worker 的步骤且未给 owner 报错',
+  () => tool('task_create').execute({ workspaceId: w1.id, title: 'x', workflowId: wf3.id, workflowStepId: 's2' }, MAIN_EXEC),
+  /没有指定执行员工/)
+
+// K6 审计 task.create
+const kAudit = (await api.audit.listEvents({ workspaceId: w1.id })).filter((e) => e.action === 'task.create')
+check('K6 4 次成功创建各一条审计', kAudit.length === 4, `实际 ${kAudit.length}`)
+check('K6 审计 resourceType=task / 带 ownerBotId',
+  kAudit[0].resourceType === 'task' && typeof kAudit[0].metadata.ownerBotId === 'string')
+check('K6 审计记录 workflowStepId', 'workflowStepId' in kAudit[0].metadata)
+
+// K7 用 service 核对（task_list 属于 dispatch-tools，不在本文件的装配工具里）
+const kTasks = api.tasks.listByWorkspace(w1.id)
+check('K7 项目下有 4 个任务', kTasks.length === 4, `实际 ${kTasks.length}`)
+check('K7 都是 planned 状态', kTasks.every((t) => t.status === 'planned'))
+check('K7 绑工作流的任务带 workflowStepId',
+  kTasks.filter((t) => t.workflowId !== undefined).length === 3)
+
 // ---------- 越权检查 ----------
 console.log('\n=== 越权检查（被派发的员工不能装配）===\n')
 
@@ -227,11 +305,19 @@ try {
 } catch (e) { p3 = /越权/.test(String(e?.message)) }
 check('P3 员工不能建工作流', p3)
 
+let p5 = false
+try {
+  await tool('task_create').execute(
+    { workspaceId: w1.id, title: '越权任务', ownerBotId: b1.id }, EMPLOYEE_EXEC)
+} catch (e) { p5 = /越权/.test(String(e?.message)) }
+check('P5 员工不能建任务', p5)
+
 // 被拒后不应该留下脏数据
 check('P4 越权被拒后没有创建出对象',
   api.workspaces.listWorkspaces().length === 2 &&
   api.bots.listBotsByWorkspace(w1.id).length === 2 &&
-  api.workflows.listByWorkspace(w1.id).length === 3)
+  api.workflows.listByWorkspace(w1.id).length === 3 &&
+  api.tasks.listByWorkspace(w1.id).length === 4)
 
 // ---------- 清理 ----------
 rmSync(tmpRoot, { recursive: true, force: true })
