@@ -210,6 +210,56 @@ check('R21 UI 建项目记了审计（1 条）', uiWs.length === 1)
 check('R21 审计 actorType=user', uiWf[0].actorType === 'user' && uiWf[0].actorId === 'user-1')
 check('R21 工作流审计带 stepIds', Array.isArray(uiWf[0].metadata.stepIds) && uiWf[0].metadata.stepIds.length === 2)
 
+// ---------- task_close：强制收尾停在中间态的任务 ----------
+console.log('\n=== R22+ task_close 路由 ===\n')
+
+const mkTask = async (title, initialStatus) =>
+  await api.tasks.createTask({
+    workspaceId: wsId, title, ownerBotId: programmer.id, createdBy: 'user',
+    ...(initialStatus !== undefined ? { initialStatus } : {}),
+  })
+
+// R22 强制收尾：planned 不在 done 的合法迁移图里，forceTo 应当绕过
+const tA = await mkTask('悬着的任务A', 'planned')
+r = await callHandler(handler, 'POST', { action: 'task_close', taskId: tA.id, forceTo: 'done', reason: '任务已废弃' })
+check('R22 task_close 成功', r.status === 200 && r.body.ok === true, `status=${r.status} ${r.body.error ?? ''}`)
+check('R22 返回 task 契约字段', r.body.task && r.body.task.id === tA.id && r.body.task.status === 'done' && r.body.task.statusZh === '完成' && typeof r.body.task.updatedAt === 'string')
+check('R22 绕过迁移图真的落库（planned → done）', api.tasks.getTask(tA.id).status === 'done')
+check('R22 done 补了 completedAt', typeof api.tasks.getTask(tA.id).completedAt === 'string')
+
+// R23 幂等：同状态再关一次不报错
+r = await callHandler(handler, 'POST', { action: 'task_close', taskId: tA.id, forceTo: 'done' })
+check('R23 重复关闭幂等（200 + done）', r.status === 200 && r.body.task.status === 'done')
+
+// R24 参数校验
+r = await callHandler(handler, 'POST', { action: 'task_close', forceTo: 'done' })
+check('R24 缺 taskId 返回 400', r.status === 400 && r.body.error.includes('taskId'))
+r = await callHandler(handler, 'POST', { action: 'task_close', taskId: tA.id, forceTo: 'reviewing' })
+check('R24 forceTo 白名单外返回 400', r.status === 400 && r.body.error.includes('forceTo'))
+r = await callHandler(handler, 'POST', { action: 'task_close', taskId: 'task_ghost', forceTo: 'done' })
+check('R24 任务不存在返回 404', r.status === 404 && r.body.error.includes('不存在'))
+
+// R25 pass / changes_req 也能强制设
+const tB = await mkTask('待裁决的任务B', 'wait_owner')
+r = await callHandler(handler, 'POST', { action: 'task_close', taskId: tB.id, forceTo: 'pass', reason: '审核通过' })
+check('R25 wait_owner → pass 成功', r.status === 200 && r.body.task.status === 'pass' && r.body.task.statusZh === '审核通过')
+const tC = await mkTask('被打回的任务C', 'dev_done')
+r = await callHandler(handler, 'POST', { action: 'task_close', taskId: tC.id, forceTo: 'changes_req', reason: '需返工' })
+check('R25 dev_done → changes_req 成功', r.status === 200 && r.body.task.status === 'changes_req')
+
+// R26 审计：task.close 带 forceTo / reason / fromStatus / toStatus / via
+r = await callHandler(handler, 'POST', { action: 'listAuditEvents', workspaceId: wsId, actionFilter: 'task.close', limit: 100 })
+const closes = r.body.events
+check('R26 记了 task.close 审计（4 条）', closes.length === 4, `实际 ${closes.length}`)
+const closeA = closes.find((e) => e.resourceId === tA.id)
+check('R26 审计字段完整', closeA !== undefined
+  && closeA.metadata.forceTo === 'done'
+  && closeA.metadata.reason === '任务已废弃'
+  && closeA.metadata.fromStatus === 'planned'
+  && closeA.metadata.toStatus === 'done'
+  && closeA.metadata.via === 'route')
+check('R26 审计 actorType=user', closeA !== undefined && closeA.actorType === 'user' && closeA.actorId === 'user-1')
+
 await api.dispose()
 
 console.log(`\n=== 结果：通过 ${pass} / 共 ${pass + fail} ===`)

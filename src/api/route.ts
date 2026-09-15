@@ -20,8 +20,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WorkspaceService } from '../workspace/workspace-service.js'
 import type { BotService } from '../bots/bot-service.js'
 import type { WorkflowService } from '../workflows/workflow-service.js'
-import type { Bot, Workflow, WorkflowStep } from '../storage/schemas.js'
+import type { Bot, Workflow, WorkflowStep, TaskStatus } from '../storage/schemas.js'
+import { TASK_STATUS_LABELS } from '../storage/schemas.js'
 import type { AuditService } from '../audit/audit-service.js'
+import type { TaskService } from '../tasks/task-service.js'
 import { allTemplates } from '../core/template-service.js'
 
 export interface AiEmployeeApi {
@@ -31,6 +33,8 @@ export interface AiEmployeeApi {
   workflows?: WorkflowService
   /** 审计服务（Phase 2 第一段加入）；缺失时不写审计、listAuditEvents 返回空。 */
   audit?: AuditService
+  /** 任务服务（task_close 用）；缺失时该 action 回 503。 */
+  tasks?: TaskService
   /** 创建者身份（审计用）；默认 'user-1'。 */
   userId?: string
 }
@@ -369,6 +373,63 @@ export function makeAiEmployeeHandler(deps: AiEmployeeHandlerDeps) {
             ...(limit !== undefined ? { limit } : {}),
           })
           sendJson(res, 200, { ok: true, events })
+          return
+        }
+
+        case 'task_close': {
+          // 强制收尾停在中间态的任务：不校验迁移图（管理员逃生口）。
+          const taskId = String(body.taskId ?? '').trim()
+          if (!taskId) {
+            sendJson(res, 400, { ok: false, error: 'taskId 不能为空' })
+            return
+          }
+          const forceTo = String(body.forceTo ?? '').trim() as TaskStatus
+          const ALLOWED_FORCE_TO: readonly TaskStatus[] = ['done', 'pass', 'changes_req']
+          if (!ALLOWED_FORCE_TO.includes(forceTo)) {
+            sendJson(res, 400, {
+              ok: false,
+              error: `forceTo 非法：${forceTo || '(空)'}；可选 ${ALLOWED_FORCE_TO.join(' / ')}`,
+            })
+            return
+          }
+          const tasks = api.tasks
+          if (tasks === undefined) {
+            sendJson(res, 503, { ok: false, error: 'AI 员工任务服务尚未就绪，请稍后重试' })
+            return
+          }
+          const before = tasks.getTask(taskId)
+          if (before === undefined) {
+            sendJson(res, 404, { ok: false, error: `任务不存在：${taskId}` })
+            return
+          }
+          const after = await tasks.setStatus(taskId, forceTo)
+          if (api.audit !== undefined) {
+            await api.audit.record({
+              workspaceId: after.workspaceId,
+              actorType: 'user',
+              actorId: userId,
+              action: 'task.close',
+              resourceType: 'task',
+              resourceId: after.id,
+              metadata: {
+                forceTo,
+                reason: typeof body.reason === 'string' ? body.reason : '',
+                fromStatus: before.status,
+                toStatus: after.status,
+                via: 'route',
+              },
+            })
+          }
+          sendJson(res, 200, {
+            ok: true,
+            task: {
+              id: after.id,
+              title: after.title,
+              status: after.status,
+              statusZh: TASK_STATUS_LABELS[after.status] ?? after.status,
+              updatedAt: after.updatedAt,
+            },
+          })
           return
         }
 

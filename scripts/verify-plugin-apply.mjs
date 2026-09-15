@@ -158,7 +158,9 @@ if (h1.registered.length === 1) {
     'workspace' in r2.body.state && 'bots' in r2.body.state && 'workflows' in r2.body.state)
 }
 
-check('A8 注册了 Tool（memory×3 + setup×4）', h1.counts().toolsRegistered === 7,
+// memory×3 + setup×4 + task_close×1 = 8
+// （本场景无 subagents → task_list/task_dispatch 不注册，但 task_close 不受影响）
+check('A8 注册了 Tool（memory×3 + setup×4 + task_close×1）', h1.counts().toolsRegistered === 8,
   `实际 ${h1.counts().toolsRegistered}`)
 
 // ---------- 场景 2：组合里没有 webServer（headless/acp/sdk）----------
@@ -169,7 +171,8 @@ apply(h2.ctx)
 await wait(60)
 
 check('B1 没有 webServer → 不注册路由、也不报错', h2.registered.length === 0)
-check('B2 Tool 仍然注册（插件核心可用）', h2.counts().toolsRegistered === 7,
+// 回归点：没有 subagents 也不能连坐 task_close（否则 headless 下任务收不了尾）
+check('B2 Tool 仍然注册（含 task_close，插件核心可用）', h2.counts().toolsRegistered === 8,
   `实际 ${h2.counts().toolsRegistered}`)
 
 // ---------- 场景 3：webServer 一开始就绪 ----------
@@ -180,7 +183,7 @@ apply(h3.ctx)
 await wait(60)
 
 check('C1 路由注册成功', h3.registered.length === 1 && h3.registered[0].path === '/ai-employee/api')
-check('C2 Tool 仍 7 个', h3.counts().toolsRegistered === 7)
+check('C2 Tool 仍 8 个', h3.counts().toolsRegistered === 8)
 
 // ---------- 场景 4：api 未就绪时路由回 503（不抛错）----------
 console.log('\n=== 场景 4：api 未就绪时回 503（不是 500/抛错）===\n')

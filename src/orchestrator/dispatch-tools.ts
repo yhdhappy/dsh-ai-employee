@@ -17,6 +17,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { TaskService } from '../tasks/task-service.js'
 import type { DispatchService } from './dispatch-service.js'
 import type { TaskStatus } from '../storage/schemas.js'
+import type { AuditService } from '../audit/audit-service.js'
 import { TASK_STATUS_LABELS } from '../storage/schemas.js'
 
 function textBlock(text: string): ContentBlock[] {
@@ -30,6 +31,12 @@ function statusZh(s: TaskStatus): string {
 export interface DispatchToolsDeps {
   tasks: TaskService
   dispatch: DispatchService
+  /** 审计（task_close 用）；缺失时跳过写审计。 */
+  audit?: AuditService
+  /** 判断某个 agent/session 是否是"被派发的员工"（越权检查用）。 */
+  isDispatchedEmployee?: (agentId: string | undefined) => boolean
+  /** 主会话里的调用方 id（v1 固定 'user-1'；接鉴权后换成真实用户）。 */
+  userId?: string
 }
 
 export function createDispatchToolDefinitions(deps: DispatchToolsDeps): ToolDefinition[] {
@@ -176,4 +183,117 @@ export function createDispatchToolDefinitions(deps: DispatchToolsDeps): ToolDefi
   })
 
   return [listTool, dispatchTool]
+}
+
+/** 收尾类 Tool 的依赖（task_close 不依赖 subagents，故与派发 Tool 分开注册）。 */
+export interface CloseToolsDeps {
+  tasks: TaskService
+  /** 审计（task.close 用）；缺失时跳过写审计。 */
+  audit?: AuditService
+  /** 判断某个 agent/session 是否是"被派发的员工"（越权检查用）。 */
+  isDispatchedEmployee?: (agentId: string | undefined) => boolean
+  /** 主会话里的调用方 id（v1 固定 'user-1'；接鉴权后换成真实用户）。 */
+  userId?: string
+}
+
+/** 收尾类 Tool：task_close（强制关闭/推进停在中间态的任务）。 */
+export function createCloseToolDefinitions(deps: CloseToolsDeps): ToolDefinition[] {
+  const { tasks, audit, isDispatchedEmployee, userId } = deps
+
+  // ---------------------------------------------------------------
+  // task_close —— 强制收尾停在中间态的任务
+  // ---------------------------------------------------------------
+  const closeTool = defineTool({
+    name: 'task_close',
+    description:
+      '强制关闭或推进一个停在中间态的任务（如 dev_done 开发完成 / wait_owner 等用户 / changes_req 需修改）：' +
+      '不校验状态迁移图，直接设到指定状态。用于工作流跑完后收尾，避免任务一直悬着。' +
+      '目标状态可选 done（关闭）/ pass（通过）/ changes_req（打回重做）。',
+    parameters: {
+      taskId: { type: 'string', required: true, description: '要关闭/推进的任务 ID' },
+      forceTo: {
+        type: 'string',
+        required: true,
+        enum: ['done', 'pass', 'changes_req'],
+        description: '强制设到哪个状态：done=关闭，pass=通过，changes_req=打回重做',
+      },
+      reason: { type: 'string', description: '关闭原因（可选，写入审计）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          task: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string' },
+              title: { type: 'string' },
+              status: { type: 'string' },
+              statusZh: { type: 'string' },
+              updatedAt: { type: 'string' },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const t = value.task
+        if (t === undefined) return textBlock('（无返回）')
+        return textBlock(
+          `任务已更新：[${t.statusZh}] ${t.title}\n- id=${t.id}\n- 状态：${t.status}（${t.statusZh}）`,
+        )
+      },
+    },
+    async execute(
+      args: { taskId: string; forceTo: 'done' | 'pass' | 'changes_req'; reason?: string },
+      exec,
+    ) {
+      // 越权检查：被派发的员工不能关闭/推进任务（只有总顾问 / 用户可执行）
+      const agentId = exec.agent?.id
+      if (isDispatchedEmployee?.(agentId) === true) {
+        throw new Error(
+          `越权：被派发的员工 session（${agentId}）不能关闭/推进任务。` +
+          '只有总顾问 / 用户可以在主会话里执行该操作。',
+        )
+      }
+
+      const before = tasks.getTask(args.taskId)
+      if (before === undefined) throw new Error(`任务不存在：${args.taskId}`)
+
+      const after = await tasks.setStatus(args.taskId, args.forceTo)
+
+      if (audit !== undefined) {
+        await audit.record({
+          workspaceId: after.workspaceId,
+          actorType: 'user',
+          actorId: userId ?? 'user-1',
+          action: 'task.close',
+          resourceType: 'task',
+          resourceId: after.id,
+          metadata: {
+            forceTo: args.forceTo,
+            reason: args.reason ?? '',
+            fromStatus: before.status,
+            toStatus: after.status,
+            via: 'tool',
+          },
+        })
+      }
+
+      return {
+        ok: true,
+        task: {
+          id: after.id,
+          title: after.title,
+          status: after.status,
+          statusZh: statusZh(after.status),
+          updatedAt: after.updatedAt,
+        },
+      }
+    },
+  })
+
+  return [closeTool]
 }

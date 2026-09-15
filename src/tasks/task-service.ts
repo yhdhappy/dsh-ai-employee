@@ -59,6 +59,17 @@ export interface TaskService {
   updateTask(input: UpdateTaskInput): Promise<Task>
   /** 状态迁移：必须满足 canTransition(currentStatus, to)。 */
   transitionStatus(id: string, to: TaskStatus): Promise<Task>
+  /**
+   * 强制设状态（管理员逃生口，**不校验 canTransition**）。
+   *
+   * 用途：收尾停在中间态（dev_done / wait_owner / changes_req…）的任务。
+   * 与 transitionStatus 的差异：
+   *   - 不做迁移图校验（例如 wait_owner → pass、planned → changes_req
+   *     这些正常通道禁止的跳转，这里直接放行）
+   *   - done 是终态：不允许从 done 改出去（done → done 幂等放行）
+   * 目标状态仍走 schema 白名单；to='done' 时补 completedAt。
+   */
+  setStatus(id: string, to: TaskStatus): Promise<Task>
   deleteTask(id: string): Promise<void>
 }
 
@@ -160,6 +171,26 @@ export function createTaskService(store: AiEmployeeStore): TaskService {
     return next
   }
 
+  async function setStatus(id: string, to: TaskStatus): Promise<Task> {
+    if (!(to in TASK_STATUS_LABELS)) throw new Error(`非法目标状态：${to}`)
+    const cur = table.get(id)
+    if (!cur) throw new Error(`任务不存在：${id}`)
+    if (cur.status === to) return cur // 幂等：相同状态不报错
+    // done 是终态，不允许改出去；done → done 已在上面幂等返回
+    if (cur.status === 'done') {
+      throw new Error(`已完成的任务不可再改状态（${TASK_STATUS_LABELS.done}）：${id}`)
+    }
+    const now = nowIso()
+    const next: Task = {
+      ...cur,
+      status: to,
+      updatedAt: now,
+      ...(to === 'done' ? { completedAt: now } : {}),
+    }
+    await table.put(next.id, next)
+    return next
+  }
+
   async function deleteTask(id: string): Promise<void> {
     const existed = await table.delete(id)
     if (!existed) throw new Error(`任务不存在：${id}`)
@@ -173,6 +204,7 @@ export function createTaskService(store: AiEmployeeStore): TaskService {
     createTask,
     updateTask,
     transitionStatus,
+    setStatus,
     deleteTask,
   }
 }
