@@ -42,10 +42,12 @@ function memTable() {
  * 造一个假 cordis ctx。
  * @param opts.mountDelayMs webServer 多久后"挂载"好（模拟 bundle 加载顺序）
  * @param opts.hasWebServer  false = 整个组合没有 webServer（headless 场景）
+ * @param opts.hasSubagents  true = 有 subagents（web 真实环境，派发能力可用）
  */
 function makeCtx(opts = {}) {
   const mountDelayMs = opts.mountDelayMs ?? 20
   const hasWebServer = opts.hasWebServer ?? true
+  const hasSubagents = opts.hasSubagents ?? false
 
   const registered = []
   const warnings = []
@@ -75,7 +77,21 @@ function makeCtx(opts = {}) {
     resolve: (req) => ({ ...req, workdir: '/', timeoutMs: 1000, stdoutMaxBytes: 1024 }),
     run: async () => ({ exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }),
   }
-  const tools = { register() { toolsRegistered += 1; return () => {} } }
+  const registeredToolNames = []
+  const tools = {
+    register(def) {
+      toolsRegistered += 1
+      if (def !== null && typeof def === 'object' && typeof def.name === 'string') {
+        registeredToolNames.push(def.name)
+      }
+      return () => {}
+    },
+  }
+  const subagents = {
+    async start() {
+      return { id: 'child-x', result: Promise.resolve({ output: [], stopReason: 'completed' }) }
+    },
+  }
 
   const makeScoped = () => ({
     get(name) { return name === 'webServer' ? webServer : base.get(name) },
@@ -89,7 +105,7 @@ function makeCtx(opts = {}) {
       if (name === 'storageDomain') return storageDomain
       if (name === 'shell') return shell
       if (name === 'tools') return tools
-      if (name === 'subagents') return undefined
+      if (name === 'subagents') return hasSubagents ? subagents : undefined
       return undefined
     },
     effect(fn) { void fn; return () => {} },
@@ -114,6 +130,7 @@ function makeCtx(opts = {}) {
     warnings,
     errors,
     counts: () => ({ toolsRegistered }),
+    toolNames: () => [...registeredToolNames],
   }
 }
 
@@ -184,6 +201,26 @@ await wait(60)
 
 check('C1 路由注册成功', h3.registered.length === 1 && h3.registered[0].path === '/ai-employee/api')
 check('C2 Tool 仍 8 个', h3.counts().toolsRegistered === 8)
+
+// ---------- 场景 3b：有 subagents（web 真实环境）----------
+// 回归点：task_close 曾经被写在 `dispatch 未装配` 的 else 分支里，
+// 结果真正带 subagents 的 web 环境反而没有 task_close，
+// 而本脚本只走 headless 分支 + 只数 Tool 个数，于是测试全绿却漏掉了这个 bug。
+console.log('\n=== 场景 3b：有 subagents（web 真实环境）===\n')
+
+const h4 = makeCtx({ mountDelayMs: 0, hasWebServer: true, hasSubagents: true })
+apply(h4.ctx)
+await wait(60)
+
+// memory×3 + setup×4 + task_list/task_dispatch/task_close×3 = 10
+check('E1 有 subagents 时注册 10 个 Tool', h4.counts().toolsRegistered === 10,
+  `实际 ${h4.counts().toolsRegistered}`)
+{
+  const names = h4.toolNames()
+  check('E2 派发 Tool 已注册', names.includes('task_dispatch') && names.includes('task_list'))
+  check('E3 task_close 在 web 环境也注册（回归点）', names.includes('task_close'),
+    `实际 [${names.join(', ')}]`)
+}
 
 // ---------- 场景 4：api 未就绪时路由回 503（不抛错）----------
 console.log('\n=== 场景 4：api 未就绪时回 503（不是 500/抛错）===\n')

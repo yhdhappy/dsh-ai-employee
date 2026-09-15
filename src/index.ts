@@ -150,12 +150,12 @@ export function apply(ctx: Context): void {
 
       // 注册派发相关 Tool。
       //   task_list / task_dispatch 依赖 subagents（派活能力）；不可用时跳过。
-      //   task_close 只依赖 tasks + audit，**不依赖 subagents**，所以单独注册，
-      //   否则 headless 等没有 subagents 的组合里连收尾任务都做不到。
+      //   task_close 只依赖 tasks + audit，**不依赖 subagents**，所以两个分支都要注册。
+      //   （曾经把它写在 else 分支里，导致有 subagents 的 web 环境反而没有 task_close。）
       const dispatchDeps = {
         tasks: created.tasks,
         ...(created.audit !== undefined ? { audit: created.audit } : {}),
-        // 被派发的员工不能关闭/推进任务
+        // 被派发的员工不能关闭/推进任务；无 sessions 时视为没有员工在跑
         isDispatchedEmployee: (id: string | undefined) =>
           created.sessions?.isDispatchedEmployee(id) ?? false,
         userId: 'user-1',
@@ -164,8 +164,8 @@ export function apply(ctx: Context): void {
         tools.push(...createDispatchToolDefinitions({ ...dispatchDeps, dispatch: created.dispatch }))
       } else {
         console.warn('[ai-employee] subagents 不可用 → 跳过 task_list / task_dispatch 注册')
-        tools.push(...createCloseToolDefinitions(dispatchDeps))
       }
+      tools.push(...createCloseToolDefinitions(dispatchDeps))
 
       // 正式插件注册 Tool 用 ctx.tools.register(definition)。
       // （`harness.defineTool/registerTool` 是**动态 Cordis 插件**的 builtin，正式包里没有。）
