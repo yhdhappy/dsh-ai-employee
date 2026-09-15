@@ -17,18 +17,26 @@
 
 import type { TaskStatus } from '../storage/schemas.js'
 
-/** 状态机迁移图：从某个状态出发，可以迁到哪些状态（含自身）。 */
+/** 状态机迁移图：从某个状态出发，可以迁到哪些状态（含自身）。
+ *
+ * 设计取向（段 2）：
+ *   - 正常工作流：planned → ready → developing → dev_done → reviewing → pass → done
+ *   - 任何非终态都可以被 `blocked`（阻塞）
+ *   - 任何非终态都可以被 `done`（关闭/收尾）——不同工作流会跳过审核，
+ *     且"关闭这张工作单"是通用动作
+ *   - `wait_owner`（等用户决策）可以从工作完成态进入
+ */
 const TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
-  planned: ['planned', 'ready', 'blocked'],
-  ready: ['ready', 'developing', 'planned', 'blocked'],
-  developing: ['developing', 'dev_done', 'blocked', 'ready'],
-  dev_done: ['dev_done', 'reviewing', 'developing', 'blocked'],
-  reviewing: ['reviewing', 'pass', 'changes_req', 'blocked'],
-  changes_req: ['changes_req', 'developing', 'blocked'],
-  re_reviewing: ['re_reviewing', 'pass', 'changes_req', 'blocked'],
+  planned: ['planned', 'ready', 'blocked', 'done'],
+  ready: ['ready', 'developing', 'planned', 'blocked', 'done'],
+  developing: ['developing', 'dev_done', 'blocked', 'ready', 'done'],
+  dev_done: ['dev_done', 'reviewing', 'developing', 'blocked', 'wait_owner', 'done'],
+  reviewing: ['reviewing', 'pass', 'changes_req', 'blocked', 'wait_owner', 'done'],
+  changes_req: ['changes_req', 'developing', 'blocked', 'wait_owner', 'done'],
+  re_reviewing: ['re_reviewing', 'pass', 'changes_req', 'blocked', 'done'],
   pass: ['pass', 'done', 'wait_owner', 'blocked'],
-  wait_owner: ['wait_owner', 'done', 'developing', 'blocked'],
-  blocked: ['blocked', 'ready', 'developing', 'planned'],
+  wait_owner: ['wait_owner', 'done', 'developing', 'ready', 'blocked'],
+  blocked: ['blocked', 'ready', 'developing', 'planned', 'done'],
   done: ['done'], // 终态
 }
 

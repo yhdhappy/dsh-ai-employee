@@ -23,6 +23,10 @@ import { createMemoryService } from '../memory/memory-service.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import { createAuditService } from '../audit/audit-service.js'
 import type { AuditService } from '../audit/audit-service.js'
+import { createSessionService } from '../sessions/session-service.js'
+import type { SessionService, SubagentsLike } from '../sessions/session-service.js'
+import { createDispatchService } from '../orchestrator/dispatch-service.js'
+import type { DispatchService } from '../orchestrator/dispatch-service.js'
 
 /** 装配所需的外部依赖。 */
 export interface AiEmployeeDeps {
@@ -31,6 +35,10 @@ export interface AiEmployeeDeps {
   /** 执行 shell 命令的方式（用于建项目目录、读写项目记忆）；返回 ok=false 表示失败。
    *  需要支持 stdout（listMemory / readMemory 用）。 */
   execCommand: (command: string) => Promise<{ ok: boolean; stdout?: string; error?: string }>
+  /** subagents 服务（ctx.get('subagents')）；用于派发子 session。
+   *  用 getter 而不是直接传值：apply() 同步阶段该服务可能还没挂载，
+   *  装配是异步的，到那时再取更稳。返回 undefined 表示不可用（派发功能关闭）。 */
+  getSubagents?: () => SubagentsLike | undefined
 }
 
 /** 装配完成的后端 API。 */
@@ -42,6 +50,9 @@ export interface AiEmployeeApi {
   tasks: TaskService
   memory: MemoryService
   audit: AuditService
+  /** subagents 不可用时为 undefined（派发功能整体不可用）。 */
+  sessions?: SessionService
+  dispatch?: DispatchService
   /** 释放：关闭 storage 域。 */
   dispose(): Promise<void>
 }
@@ -64,6 +75,16 @@ export async function createAiEmployee(deps: AiEmployeeDeps): Promise<AiEmployee
       workspaceExists: (workspaceId) => workspaces.getWorkspace(workspaceId) !== undefined,
       audit,
     })
+
+    // 派发层只有在 subagents 可用时才装配（headless 探针 / 单测可以不给）
+    let sessions: SessionService | undefined
+    let dispatch: DispatchService | undefined
+    const subagents = deps.getSubagents?.()
+    if (subagents !== undefined) {
+      sessions = createSessionService({ subagents, bots, audit })
+      dispatch = createDispatchService({ tasks, workflows, memory, sessions, audit })
+    }
+
     return {
       store,
       workspaces,
@@ -72,6 +93,8 @@ export async function createAiEmployee(deps: AiEmployeeDeps): Promise<AiEmployee
       tasks,
       memory,
       audit,
+      ...(sessions !== undefined ? { sessions } : {}),
+      ...(dispatch !== undefined ? { dispatch } : {}),
       dispose: () => store.close(),
     }
   } catch (err) {

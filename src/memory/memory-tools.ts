@@ -45,7 +45,7 @@ export function createMemoryToolDefinitions(deps: MemoryToolsDeps): ToolDefiniti
   const { memory } = deps
 
   const writeTool = defineTool({
-    name: 'workspace.write_memory',
+    name: 'workspace_write_memory',
     description:
       '把一段 Markdown 内容写到指定项目记忆文件（位于 <workspaceRoot>/docs/）。' +
       'fileName 必须是 .md 后缀，不允许 .. 越界。返回写入的 fileName、绝对路径和字节数。',
@@ -81,7 +81,7 @@ export function createMemoryToolDefinitions(deps: MemoryToolsDeps): ToolDefiniti
   })
 
   const readTool = defineTool({
-    name: 'workspace.read_memory',
+    name: 'workspace_read_memory',
     description: '读指定项目记忆文件的 Markdown 内容。返回 fileName、绝对路径、content。',
     parameters: {
       workspaceId: { type: 'string', required: true, description: '项目 ID' },
@@ -115,7 +115,7 @@ export function createMemoryToolDefinitions(deps: MemoryToolsDeps): ToolDefiniti
   })
 
   const listTool = defineTool({
-    name: 'workspace.list_memory',
+    name: 'workspace_list_memory',
     description: '列出指定项目记忆目录下所有 Markdown 文件（含子目录）。返回文件名 + 路径 + 字节数。',
     parameters: {
       workspaceId: { type: 'string', required: true, description: '项目 ID' },

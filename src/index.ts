@@ -17,12 +17,20 @@ import { createAiEmployee } from './core/plugin.js'
 import type { AiEmployeeApi } from './core/plugin.js'
 import { makeAiEmployeeHandler } from './api/route.js'
 import { createMemoryToolDefinitions } from './memory/memory-tools.js'
+import { createDispatchToolDefinitions } from './orchestrator/dispatch-tools.js'
+import type { SubagentsLike } from './sessions/session-service.js'
 
 /** 插件名，对应 cordis.patch.yml 里的 row `id`。 */
 export const name = 'ai-employee-plugin'
 
-/** 硬依赖。 */
-export const inject: readonly string[] = ['storageDomain', 'webServer']
+/**
+ * 硬依赖只有 storageDomain。
+ *
+ * webServer 是**软依赖**：只有 Web profile 才有它。headless / acp / sdk 等
+ * 没有 webserver 的组合里，插件核心（项目记忆 Tool、派发 Tool）仍然应该可用，
+ * 只是不注册 HTTP 路由。所以用 ctx.get('webServer') 而不是 inject。
+ */
+export const inject: readonly string[] = ['storageDomain']
 
 /** HTTP API 路由路径。客户端 fetch 用同一个路径。 */
 const API_PATH = '/ai-employee/api'
@@ -76,7 +84,12 @@ export function apply(ctx: Context): void {
   })
 
   // 装配是异步的；装配完成后再注册路由 + Tool
-  void createAiEmployee({ storageDomain, execCommand: makeExecCommand(ctx) })
+  void createAiEmployee({
+    storageDomain,
+    execCommand: makeExecCommand(ctx),
+    // subagents 在 apply() 同步阶段可能还没挂载；装配是异步的，那时再取更稳。
+    getSubagents: () => ctx.get('subagents') as SubagentsLike | undefined,
+  })
     .then((created) => {
       if (stopped) {
         void created.dispose()
@@ -101,24 +114,40 @@ export function apply(ctx: Context): void {
         disposeRoute = route
       }
 
-      // 注册 3 个 memory Tool（模型可见）
+      // 注册 memory Tool（模型可见）
       const tools = createMemoryToolDefinitions({ memory: created.memory })
-      const toolDisposers: (() => void)[] = []
-      for (const tool of tools) {
-        // harness 是 Cordis 内置 builtin；不在 service catalog 里
-        const harness = (ctx as unknown as {
-          harness?: {
-            defineTool: (def: unknown) => unknown
-            registerTool: (c: Context, def: unknown) => () => void
-          }
-        }).harness
-        if (harness === undefined) {
-          console.error('[ai-employee] harness 不可用，跳过 Tool 注册')
-          break
-        }
-        const defined = harness.defineTool(tool) as Parameters<typeof harness.registerTool>[1]
-        toolDisposers.push(harness.registerTool(ctx, defined))
+
+      // 注册派发 Tool（仅当 subagents 可用、dispatch 已装配）
+      if (created.dispatch !== undefined && created.tasks !== undefined) {
+        tools.push(...createDispatchToolDefinitions({
+          tasks: created.tasks,
+          dispatch: created.dispatch,
+        }))
+      } else {
+        console.warn('[ai-employee] subagents 不可用 → 跳过 task.list / task.dispatch 注册')
       }
+
+      // 正式插件注册 Tool 用 ctx.tools.register(definition)。
+      // （`harness.defineTool/registerTool` 是**动态 Cordis 插件**的 builtin，正式包里没有。）
+      const toolRuntime = ctx.get('tools') as
+        | { register(def: unknown): () => void }
+        | undefined
+      const toolDisposers: (() => void)[] = []
+      if (toolRuntime === undefined) {
+        console.error('[ai-employee] tools 服务不可用 → 跳过 Tool 注册')
+      } else {
+        for (const tool of tools) {
+          try {
+            toolDisposers.push(toolRuntime.register(tool))
+          } catch (e) {
+            console.error(
+              `[ai-employee] 注册 Tool "${tool.name}" 失败：`,
+              e instanceof Error ? e.message : String(e),
+            )
+          }
+        }
+      }
+
       if (stopped) {
         // 极端 race：装配完成后立刻被卸载——撤销所有注册的 Tool 并释放 api
         for (const d of toolDisposers) {

@@ -20,11 +20,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WorkspaceService } from '../workspace/workspace-service.js'
 import type { BotService } from '../bots/bot-service.js'
 import type { Bot } from '../storage/schemas.js'
+import type { AuditService } from '../audit/audit-service.js'
 import { allTemplates } from '../core/template-service.js'
 
 export interface AiEmployeeApi {
   workspaces: WorkspaceService
   bots: BotService
+  /** 审计服务（Phase 2 第一段加入）；缺失时 listAuditEvents 返回空。 */
+  audit?: AuditService
 }
 
 export interface AiEmployeeHandlerDeps {
@@ -180,6 +183,35 @@ export function makeAiEmployeeHandler(deps: AiEmployeeHandlerDeps) {
             actor,
           })
           sendJson(res, 200, { ok: true, bot: toBotDto(bot) })
+          return
+        }
+
+        case 'listAuditEvents': {
+          if (api.audit === undefined) {
+            sendJson(res, 200, { ok: true, events: [] })
+            return
+          }
+          const workspaceId = String(body.workspaceId ?? '').trim()
+          if (!workspaceId) {
+            sendJson(res, 400, { ok: false, error: 'workspaceId 不能为空' })
+            return
+          }
+          const since = typeof body.since === 'string' ? body.since : undefined
+          // 注意：不要用 `action` 命名这个过滤字段 —— 会遮蔽外层的 action（分发动作名）
+          const actionFilter = typeof body.actionFilter === 'string'
+            ? body.actionFilter
+            : (typeof body.auditAction === 'string' ? body.auditAction : undefined)
+          const rawLimit = body.limit
+          const limit = typeof rawLimit === 'number' && Number.isFinite(rawLimit)
+            ? rawLimit
+            : undefined
+          const events = await api.audit.listEvents({
+            workspaceId,
+            ...(since !== undefined ? { since } : {}),
+            ...(actionFilter !== undefined ? { action: actionFilter } : {}),
+            ...(limit !== undefined ? { limit } : {}),
+          })
+          sendJson(res, 200, { ok: true, events })
           return
         }
 
