@@ -17,11 +17,14 @@
  */
 
 import type { Task, TaskStatus } from '../storage/schemas.js'
+import { canTransition, nextStates } from '../core/status-machine.js'
 import type { TaskService } from '../tasks/task-service.js'
 import type { WorkflowService } from '../workflows/workflow-service.js'
 import type { MemoryService } from '../memory/memory-service.js'
 import type { SessionService } from '../sessions/session-service.js'
 import type { AuditService } from '../audit/audit-service.js'
+import type { WorkspaceService } from '../workspace/workspace-service.js'
+import { buildTaskPrompt, transitionPath } from './dispatch-internals.js'
 
 /** 派发一个 task 时，任务在跑之前要进入的状态。 */
 const RUNNING_STATUS: TaskStatus = 'developing'
@@ -68,6 +71,8 @@ export interface DispatchServiceDeps {
   memory: MemoryService
   sessions: SessionService
   audit?: AuditService
+  /** 用于把项目根路径写进子员工 prompt（只用到 getWorkspace）。 */
+  workspaces?: Pick<WorkspaceService, 'getWorkspace'>
 }
 
 export interface DispatchService {
@@ -77,38 +82,28 @@ export interface DispatchService {
   dispatchOne(input: DispatchTaskInput): Promise<DispatchStep>
 }
 
-function buildPrompt(task: Task): string {
-  const lines: string[] = []
-  lines.push(`# 你的任务：${task.title}`)
-  if (task.description !== undefined && task.description.trim() !== '') {
-    lines.push('')
-    lines.push('## 任务说明')
-    lines.push(task.description)
-  }
-  lines.push('')
-  lines.push('## 要求')
-  lines.push('- 完成后，用一段话总结：你做了什么、验证了什么、有什么已知风险。')
-  lines.push('- 不要重复本任务说明，直接干活。')
-  return lines.join('\n')
-}
-
 export function createDispatchService(deps: DispatchServiceDeps): DispatchService {
   const { tasks, workflows, memory, sessions, audit } = deps
 
   /** 把任务推进到 running 状态（容忍已经是该状态）。 */
   async function toRunning(task: Task): Promise<Task> {
     if (task.status === RUNNING_STATUS) return task
-    // planned / ready / changes_req 都可以进 developing
-    return await tasks.transitionStatus(task.id, RUNNING_STATUS)
+    // 状态机只允许 planned → ready → developing，
+    // 所以从 planned / wait_owner 起跑时要按路径逐步走，不能一步跳。
+    const path = transitionPath(task.status, RUNNING_STATUS)
+    let cur = task
+    for (const next of path) cur = await tasks.transitionStatus(cur.id, next)
+    return cur
   }
 
   /** 跑来一个 task 的 owner bot；返回本步结果（不改任务状态）。 */
   async function runOne(task: Task, input: DispatchTaskInput): Promise<DispatchStep> {
     const running = await toRunning(task)
+    const rootPath = deps.workspaces?.getWorkspace(running.workspaceId)?.rootPath
     const result = await sessions.dispatchToBot({
       workspaceId: running.workspaceId,
       botId: running.ownerBotId,
-      prompt: buildPrompt(running),
+      prompt: buildTaskPrompt(running, rootPath),
       parent: input.parent,
       signal: input.signal,
       taskId: running.id,

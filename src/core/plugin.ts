@@ -82,7 +82,7 @@ export async function createAiEmployee(deps: AiEmployeeDeps): Promise<AiEmployee
     const subagents = deps.getSubagents?.()
     if (subagents !== undefined) {
       sessions = createSessionService({ subagents, bots, audit })
-      dispatch = createDispatchService({ tasks, workflows, memory, sessions, audit })
+      dispatch = createDispatchService({ tasks, workflows, memory, sessions, audit, workspaces })
     }
 
     return {

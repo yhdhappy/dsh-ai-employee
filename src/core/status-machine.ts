@@ -32,7 +32,8 @@ const TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   developing: ['developing', 'dev_done', 'blocked', 'ready', 'done'],
   dev_done: ['dev_done', 'reviewing', 'developing', 'blocked', 'wait_owner', 'done'],
   reviewing: ['reviewing', 'pass', 'changes_req', 'blocked', 'wait_owner', 'done'],
-  changes_req: ['changes_req', 'developing', 'blocked', 'wait_owner', 'done'],
+  // 审核打回后，程序员通常直接重新开工（不必先回 ready）
+  changes_req: ['changes_req', 'ready', 'developing', 'blocked', 'wait_owner', 'done'],
   re_reviewing: ['re_reviewing', 'pass', 'changes_req', 'blocked', 'done'],
   pass: ['pass', 'done', 'wait_owner', 'blocked'],
   wait_owner: ['wait_owner', 'done', 'developing', 'ready', 'blocked'],

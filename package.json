@@ -34,7 +34,7 @@
     "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"lint: not configured yet\" && exit 0",
-    "test": "node --test test/"
+    "test": "node --test \"test/**/*.test.mjs\""
   },
   "dependencies": {
     "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
