@@ -103,6 +103,17 @@ var chipStyle = {
 }
 var errorStyle = { color: '#c0392b', fontSize: '12px', marginTop: '6px' }
 var hintStyle = { color: '#888', fontSize: '12px', marginTop: '4px' }
+/** 对话式入口提示块：常驻在面板里，告诉用户怎么用主对话驱动 AI 团队。 */
+var chatHintStyle = {
+  marginTop: '8px',
+  padding: '7px 9px',
+  background: '#eef4ff',
+  border: '1px solid #d6e2ff',
+  borderRadius: '6px',
+  fontSize: '11.5px',
+  lineHeight: '1.55',
+  color: '#33507a',
+}
 var detailBoxStyle = {
   marginTop: '6px',
   padding: '8px 10px',
@@ -284,6 +295,17 @@ function AiEmployeePanel() {
 
     error ? createElement('div', { style: errorStyle }, error) : null,
 
+    // 对话式入口提示：告诉用户"跟总顾问说"这条路怎么走
+    createElement('div', { style: chatHintStyle },
+      createElement('div', { style: { fontWeight: 600 } }, '💬 想对话式搭团队？'),
+      createElement('div', { style: { marginTop: '2px' } },
+        '去主对话里对总顾问说一句，例如：'),
+      createElement('div', { style: { marginTop: '2px', fontStyle: 'italic' } },
+        '「帮我搭个团队：先让程序员干，干完交给审核员」'),
+      createElement('div', { style: { marginTop: '3px', fontSize: '11px', color: '#5b78a8' } },
+        '总顾问会自动建项目 / 员工 / 工作流，并把任务派下去跑完整条链。'),
+    ),
+
     !hasWs
       ? createElement('form', { onSubmit: submitCreateProject, style: { marginTop: '4px' } },
           createElement('div', { style: sectionTitleStyle }, '建项目'),
@@ -428,7 +450,9 @@ function AiEmployeePanel() {
                     },
                       createElement('option', { value: '' }, '（等用户决策 / 不指派）'),
                       (state.bots || []).map(function (b) {
-                        return createElement('option', { key: b.id, value: b.id }, b.name + ' · ' + b.role)
+                        // name 和 role 相同时只显示一次（v1 用样板默认名后两者总相等）
+                        var optLabel = b.name === b.role ? b.name : (b.name + ' · ' + b.role)
+                        return createElement('option', { key: b.id, value: b.id }, optLabel)
                       }),
                     ),
                     createElement('button', {
@@ -442,14 +466,14 @@ function AiEmployeePanel() {
                     }, '×'),
                   )
                 }),
-                createElement('div', { style: { display: 'flex', gap: '6px', marginTop: '4px' } },
-                  createElement('button', {
-                    type: 'button', onClick: addStep, style: ghostButtonStyle,
-                  }, '＋ 加一步'),
+                createElement('div', { style: { display: 'flex', gap: '6px', marginTop: '6px' } },
                   createElement('button', {
                     type: 'submit', disabled: busy,
                     style: busy ? buttonDisabledStyle : buttonStyle,
-                  }, busy ? '处理中…' : '建工作流'),
+                  }, busy ? '处理中…' : '新建工作流'),
+                  createElement('button', {
+                    type: 'button', onClick: addStep, style: ghostButtonStyle,
+                  }, '添加步骤'),
                   createElement('button', {
                     type: 'button', onClick: function () { setWfOpen(false); setError(null) },
                     style: Object.assign({}, ghostButtonStyle, { color: '#888', borderColor: '#ccc' }),
