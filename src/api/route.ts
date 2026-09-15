@@ -36,7 +36,14 @@ export interface AiEmployeeApi {
 }
 
 export interface AiEmployeeHandlerDeps {
-  api: AiEmployeeApi
+  /** 直接传入装配好的 api（单元测试与简单场景用）。 */
+  api?: AiEmployeeApi
+  /**
+   * 延迟取 api。路由可能在装配完成前就注册好了（webServer 与 storageDomain
+   * 的挂载顺序不保证），此时 getApi() 返回 undefined，路由回 503 而不是抛错——
+   * 客户端稍后重试即可，不需要重启。
+   */
+  getApi?: () => AiEmployeeApi | undefined
   /** 当前调用方的稳定 id（v1 固定 'user-1'；Phase 2 接鉴权后换成真实用户）。 */
   userId: string
 }
@@ -119,9 +126,19 @@ function toWorkflowDto(w: Workflow) {
 
 /** 构造路由 handler。 */
 export function makeAiEmployeeHandler(deps: AiEmployeeHandlerDeps) {
-  const { api, userId } = deps
+  const { userId } = deps
+  /** 解析当前可用的 api；未就绪返回 undefined（调用方回 503）。 */
+  const resolveApi = (): AiEmployeeApi | undefined =>
+    deps.getApi !== undefined ? deps.getApi() : deps.api
 
   return async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // 装配可能还没完成（webServer 与 storageDomain 挂载顺序不保证）。
+    // 回 503 而不是 500/抛错：客户端稍后重试即可。
+    const api = resolveApi()
+    if (api === undefined) {
+      sendJson(res, 503, { ok: false, error: 'AI 员工后端尚未装配完成，请稍后重试' })
+      return
+    }
     // 仅接受 POST
     if (req.method !== 'POST') {
       sendJson(res, 405, { ok: false, error: `method not allowed: ${req.method}` })

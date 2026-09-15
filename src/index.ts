@@ -58,22 +58,25 @@ function makeExecCommand(ctx: Context) {
 }
 
 export function apply(ctx: Context): void {
+  const applyStartedAt = Date.now()
   const storageDomain = ctx.get('storageDomain')
-  const webServer = ctx.get('webServer')
-  if (storageDomain === undefined) return
+  console.log(
+    `[ai-employee] apply() 启动（storageDomain=${storageDomain === undefined ? '缺失' : '就绪'}, ` +
+    `webServer(sync)=${ctx.get('webServer') === undefined ? '未就绪' : '就绪'}）`,
+  )
+  if (storageDomain === undefined) {
+    console.error('[ai-employee] storageDomain 缺失 → 插件不装配')
+    return
+  }
 
   let api: AiEmployeeApi | undefined
-  let disposeRoute: (() => void) | undefined
   let disposeTools: (() => void) | undefined
   let stopped = false
 
-  // effect 卸载：插件停掉时释放 route、tool、api
+  // effect 卸载：插件停掉时释放 tool 和 api
+  // （路由的销毁由它自己的作用域 effect 负责，见下面 ctx.inject）
   ctx.effect(() => () => {
     stopped = true
-    if (disposeRoute !== undefined) {
-      try { disposeRoute() } catch { /* ignore */ }
-      disposeRoute = undefined
-    }
     if (disposeTools !== undefined) {
       try { disposeTools() } catch { /* ignore */ }
       disposeTools = undefined
@@ -84,11 +87,42 @@ export function apply(ctx: Context): void {
     }
   })
 
-  // 装配是异步的；装配完成后再注册路由 + Tool
+  // ---------------------------------------------------------------
+  // HTTP 路由：用**作用域 inject** 等 webServer 就绪，而不是赌挂载时序。
+  //
+  // 踩过的坑：webServer 由 web-app bundle 提供，挂载时机晚于本插件的 apply()。
+  // 若在 apply() 里同步 `ctx.get('webServer')`，拿到 undefined，路由被整个跳过 →
+  // 浏览器面板能渲染（客户端半边来自 loader roster），但所有 API 调用 405/404。
+  //
+  // ctx.inject(['webServer'], cb) 只在依赖就绪时调用 cb，且不阻塞 headless /
+  // acp / sdk（那些组合没有 webServer，cb 永不执行，插件其余功能照常）。
+  //
+  // handler 用 getApi 延迟取 api；api 还没装配好时回 503，客户端重试即可。
+  // ---------------------------------------------------------------
+  ctx.inject(['webServer'], (scoped) => {
+    const webServer = scoped.get('webServer') as
+      | { register(route: unknown): () => void }
+      | undefined
+    if (webServer === undefined) return
+    const route = webServer.register({
+      kind: 'exact',
+      path: API_PATH,
+      handler: makeAiEmployeeHandler({
+        getApi: () => api,
+        userId: 'user-1', // Phase 2 接鉴权后换成真实用户
+      }),
+    })
+    console.log(`[ai-employee] HTTP 路由已注册：${API_PATH}（apply 后 ${Date.now() - applyStartedAt}ms）`)
+    scoped.effect(() => () => {
+      try { route() } catch { /* ignore */ }
+    })
+  })
+
+  // 装配（异步）；完成后注册 Tool
   void createAiEmployee({
     storageDomain,
     execCommand: makeExecCommand(ctx),
-    // subagents 在 apply() 同步阶段可能还没挂载；装配是异步的，那时再取更稳。
+    // subagents 也由别的 bundle 提供，同步阶段可能还没挂载；装配时再取
     getSubagents: () => ctx.get('subagents') as SubagentsLike | undefined,
   })
     .then((created) => {
@@ -97,23 +131,6 @@ export function apply(ctx: Context): void {
         return
       }
       api = created
-
-      // 注册 HTTP 路由
-      if (webServer !== undefined) {
-        const userId = 'user-1' // Phase 2 接鉴权后换成真实用户
-        const route = webServer.register({
-          kind: 'exact',
-          path: API_PATH,
-          handler: makeAiEmployeeHandler({ api, userId }),
-        })
-        if (stopped) {
-          try { route() } catch { /* ignore */ }
-          void created.dispose()
-          api = undefined
-          return
-        }
-        disposeRoute = route
-      }
 
       // 注册内存 Tool（模型可见）
       const tools = createMemoryToolDefinitions({ memory: created.memory })
@@ -166,14 +183,15 @@ export function apply(ctx: Context): void {
         for (const d of toolDisposers) {
           try { d() } catch { /* ignore */ }
         }
-        if (disposeRoute !== undefined) {
-          try { disposeRoute() } catch { /* ignore */ }
-          disposeRoute = undefined
-        }
         void created.dispose()
         api = undefined
         return
       }
+      console.log(
+        `[ai-employee] 后端装配完成：${toolDisposers.length} 个 Tool 已注册` +
+        `（dispatch=${created.dispatch === undefined ? '不可用' : '可用'}，` +
+        `apply 后 ${Date.now() - applyStartedAt}ms）`,
+      )
       disposeTools = () => {
         for (const d of toolDisposers) {
           try { d() } catch { /* ignore */ }
