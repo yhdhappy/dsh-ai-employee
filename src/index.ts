@@ -18,6 +18,7 @@ import type { AiEmployeeApi } from './core/plugin.js'
 import { makeAiEmployeeHandler } from './api/route.js'
 import { createMemoryToolDefinitions } from './memory/memory-tools.js'
 import { createDispatchToolDefinitions } from './orchestrator/dispatch-tools.js'
+import { createSetupToolDefinitions } from './core/setup-tools.js'
 import type { SubagentsLike } from './sessions/session-service.js'
 
 /** 插件名，对应 cordis.patch.yml 里的 row `id`。 */
@@ -114,8 +115,20 @@ export function apply(ctx: Context): void {
         disposeRoute = route
       }
 
-      // 注册 memory Tool（模型可见）
+      // 注册内存 Tool（模型可见）
       const tools = createMemoryToolDefinitions({ memory: created.memory })
+
+      // 注册装配 Tool：建项目 / 建员工 / 建工作流
+      // （V0.3 §13.3「方式 A：跟总顾问说」的基础设施）
+      tools.push(...createSetupToolDefinitions({
+        workspaces: created.workspaces,
+        bots: created.bots,
+        workflows: created.workflows,
+        ...(created.audit !== undefined ? { audit: created.audit } : {}),
+        // 被派发的员工不能建项目/员工/工作流；无 sessions（无 subagents）时视为没有员工在跑
+        isDispatchedEmployee: (id) => created.sessions?.isDispatchedEmployee(id) ?? false,
+        userId: 'user-1',
+      }))
 
       // 注册派发 Tool（仅当 subagents 可用、dispatch 已装配）
       if (created.dispatch !== undefined && created.tasks !== undefined) {
@@ -124,7 +137,7 @@ export function apply(ctx: Context): void {
           dispatch: created.dispatch,
         }))
       } else {
-        console.warn('[ai-employee] subagents 不可用 → 跳过 task.list / task.dispatch 注册')
+        console.warn('[ai-employee] subagents 不可用 → 跳过 task_list / task_dispatch 注册')
       }
 
       // 正式插件注册 Tool 用 ctx.tools.register(definition)。
